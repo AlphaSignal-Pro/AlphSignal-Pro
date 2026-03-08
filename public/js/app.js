@@ -1,0 +1,732 @@
+// ============================================
+// AlphaSignal Pro - Frontend Application
+// 100% Client-Side (GitHub Pages compatible)
+// ============================================
+
+// ==================== FIREBASE CONFIG ====================
+const firebaseConfig = {
+    apiKey: "AIzaSyC0vTDfbIwPKUvSH9L_ArwhYS0H48Gt5Yo",
+    authDomain: "alphasignal-pro.firebaseapp.com",
+    projectId: "alphasignal-pro",
+    storageBucket: "alphasignal-pro.firebasestorage.app",
+    messagingSenderId: "1038193993643",
+    appId: "1:1038193993643:web:383bf3b8911e1df3f114ee",
+    measurementId: "G-EEGG4KT63V"
+};
+
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
+
+// ==================== CONFIG ====================
+const BINANCE_WS_BASE = 'wss://stream.binance.com:9443/ws';
+const BINANCE_API = 'https://api.binance.com/api/v3';
+const SYMBOLS = ['btcusdt', 'ethusdt', 'bnbusdt', 'solusdt', 'xrpusdt', 'dogeusdt', 'adausdt', 'avaxusdt'];
+const KLINE_INTERVAL = '1m';
+
+// ==================== STATE ====================
+let binanceWs = null;
+let isPresent = false;
+let signals = [];
+let prices = {};
+let priceHistory = {};
+let countdownIntervals = {};
+let reconnectAttempts = 0;
+let todaySignalCount = 0;
+let alertAudio = null;
+let signalEngine = null;
+
+// ==================== INIT ====================
+auth.onAuthStateChanged((user) => {
+    if (user) {
+        showDashboard();
+        connectWebSocket();
+        initAudio();
+    } else {
+        showLogin();
+    }
+});
+
+// ==================== AUTH ====================
+function showLogin() {
+    document.getElementById('loginScreen').classList.remove('hidden');
+    document.getElementById('dashboard').classList.add('hidden');
+}
+
+function showDashboard() {
+    document.getElementById('loginScreen').classList.add('hidden');
+    document.getElementById('dashboard').classList.remove('hidden');
+}
+
+async function handleLogin() {
+    const email = document.getElementById('loginEmail').value.trim();
+    const password = document.getElementById('loginPassword').value;
+    const errorEl = document.getElementById('loginError');
+    const btn = document.getElementById('loginBtn');
+
+    if (!email || !password) {
+        errorEl.textContent = 'Ingresa correo y contraseña';
+        errorEl.classList.remove('hidden');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verificando...';
+    errorEl.classList.add('hidden');
+
+    try {
+        await auth.signInWithEmailAndPassword(email, password);
+        showToast('¡Bienvenido a AlphaSignal Pro!', 'success');
+    } catch (error) {
+        let msg = 'Error de autenticación';
+        if (error.code === 'auth/user-not-found') msg = 'Usuario no encontrado';
+        else if (error.code === 'auth/wrong-password') msg = 'Contraseña incorrecta';
+        else if (error.code === 'auth/invalid-email') msg = 'Correo inválido';
+        else if (error.code === 'auth/too-many-requests') msg = 'Demasiados intentos. Espera un momento.';
+        
+        errorEl.textContent = msg;
+        errorEl.classList.remove('hidden');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Acceder al Dashboard';
+    }
+}
+
+function handleLogout() {
+    if (binanceWs) binanceWs.close();
+    auth.signOut();
+    showToast('Sesión cerrada', 'info');
+}
+
+function togglePasswordVisibility() {
+    const input = document.getElementById('loginPassword');
+    const icon = document.getElementById('passToggleIcon');
+    if (input.type === 'password') {
+        input.type = 'text';
+        icon.classList.replace('fa-eye', 'fa-eye-slash');
+    } else {
+        input.type = 'password';
+        icon.classList.replace('fa-eye-slash', 'fa-eye');
+    }
+}
+
+// Enter key login
+document.getElementById('loginPassword')?.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') handleLogin();
+});
+
+// ==================== BINANCE WEBSOCKET (Direct from Browser) ====================
+function connectWebSocket() {
+    signalEngine = new SignalEngine();
+    SYMBOLS.forEach(s => { priceHistory[s] = []; prices[s] = { price: 0, change24h: 0 }; });
+
+    // Fetch initial 24h ticker data
+    fetch24hTickers();
+
+    // Load historical klines for signal engine
+    loadHistoricalKlines();
+
+    const streams = SYMBOLS.map(s => `${s}@kline_${KLINE_INTERVAL}/${s}@miniTicker`).join('/');
+    const wsUrl = `${BINANCE_WS_BASE}/${streams}`;
+
+    console.log('🔌 Conectando a Binance WebSocket...');
+    binanceWs = new WebSocket(wsUrl);
+
+    binanceWs.onopen = () => {
+        console.log('✅ Conectado a Binance');
+        reconnectAttempts = 0;
+        updateConnectionStatus(true);
+    };
+
+    binanceWs.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            if (data.e === 'kline') handleKline(data);
+            else if (data.e === '24hrMiniTicker') handleMiniTicker(data);
+        } catch (e) {}
+    };
+
+    binanceWs.onclose = () => {
+        console.log('❌ Binance WS desconectado');
+        updateConnectionStatus(false);
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+        reconnectAttempts++;
+        setTimeout(connectWebSocket, delay);
+    };
+
+    binanceWs.onerror = () => console.error('⚠️ Binance WS error');
+
+    // Expiration checker
+    setInterval(() => {
+        let changed = false;
+        signals.forEach(s => {
+            if (!s.expired && (Date.now() - s.timestamp) > 120000) { s.expired = true; changed = true; }
+        });
+        if (changed) { renderSignals(); updateStats(); }
+    }, 5000);
+
+    // Latency ping
+    setInterval(() => {
+        const start = Date.now();
+        fetch(`${BINANCE_API}/ping`).then(() => {
+            const ms = Date.now() - start;
+            document.getElementById('latencyDisplay').innerHTML = `${ms}<span class="text-sm text-gray-500">ms</span>`;
+        }).catch(() => {});
+    }, 15000);
+}
+
+async function fetch24hTickers() {
+    try {
+        const resp = await fetch(`${BINANCE_API}/ticker/24hr?symbols=${JSON.stringify(SYMBOLS.map(s => s.toUpperCase()))}`);
+        const data = await resp.json();
+        data.forEach(t => {
+            const sym = t.symbol.toLowerCase();
+            if (prices[sym]) {
+                prices[sym].price = parseFloat(t.lastPrice);
+                prices[sym].change24h = parseFloat(t.priceChangePercent);
+                prices[sym].high24h = parseFloat(t.highPrice);
+                prices[sym].low24h = parseFloat(t.lowPrice);
+                prices[sym].volume24h = parseFloat(t.volume);
+            }
+        });
+        renderPrices();
+    } catch (e) {
+        console.error('Error fetching 24h tickers:', e);
+        // Render empty grid anyway
+        renderPrices();
+    }
+}
+
+async function loadHistoricalKlines() {
+    for (const symbol of SYMBOLS) {
+        try {
+            const resp = await fetch(`${BINANCE_API}/klines?symbol=${symbol.toUpperCase()}&interval=${KLINE_INTERVAL}&limit=50`);
+            const data = await resp.json();
+            priceHistory[symbol] = data.map(k => ({
+                time: k[0], open: parseFloat(k[1]), high: parseFloat(k[2]),
+                low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5])
+            }));
+        } catch (e) {
+            console.error(`Error loading klines for ${symbol}:`, e);
+        }
+    }
+    console.log('📊 Datos históricos cargados para análisis');
+}
+
+function handleKline(data) {
+    const symbol = data.s.toLowerCase();
+    const k = data.k;
+    const close = parseFloat(k.c);
+    const high = parseFloat(k.h);
+    const low = parseFloat(k.l);
+    const volume = parseFloat(k.v);
+    const isClosed = k.x;
+
+    // Update live price
+    const prevPrice = prices[symbol]?.price || close;
+    if (!prices[symbol]) prices[symbol] = {};
+    prices[symbol].price = close;
+
+    updatePriceDOM(symbol, close, prevPrice);
+
+    if (isClosed) {
+        if (!priceHistory[symbol]) priceHistory[symbol] = [];
+        priceHistory[symbol].push({ close, high, low, volume, time: k.t, open: parseFloat(k.o) });
+        if (priceHistory[symbol].length > 100) priceHistory[symbol] = priceHistory[symbol].slice(-100);
+
+        // Run signal analysis
+        if (priceHistory[symbol].length >= 26 && signalEngine) {
+            const signal = signalEngine.analyze(symbol, priceHistory[symbol]);
+            if (signal) {
+                handleNewSignal(signal);
+                console.log(`🚀 SEÑAL: ${signal.direction} ${signal.symbol} @ ${signal.price} | Fuerza: ${signal.strength.value}%`);
+            }
+        }
+    }
+}
+
+function handleMiniTicker(data) {
+    const symbol = data.s.toLowerCase();
+    if (prices[symbol]) {
+        const openPrice = parseFloat(data.o);
+        const closePrice = parseFloat(data.c);
+        prices[symbol].change24h = openPrice > 0 ? ((closePrice - openPrice) / openPrice) * 100 : 0;
+
+        const changeEl = document.querySelector(`#price-${symbol} .price-change`);
+        if (changeEl) {
+            const change = prices[symbol].change24h;
+            changeEl.textContent = `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
+            changeEl.className = `price-change text-xs font-mono ${change >= 0 ? 'text-[#00ff41]' : 'text-red-400'}`;
+        }
+    }
+}
+
+function updatePriceDOM(symbol, price, prevPrice) {
+    const el = document.getElementById(`price-${symbol}`);
+    if (!el) return;
+
+    const valueEl = el.querySelector('.price-value');
+    if (valueEl) {
+        valueEl.textContent = formatPrice(price);
+        el.classList.remove('price-flash-up', 'price-flash-down');
+        if (price > prevPrice) {
+            el.classList.add('price-flash-up');
+            valueEl.className = 'price-value text-lg font-bold font-mono price-up';
+        } else if (price < prevPrice) {
+            el.classList.add('price-flash-down');
+            valueEl.className = 'price-value text-lg font-bold font-mono price-down';
+        }
+        setTimeout(() => el.classList.remove('price-flash-up', 'price-flash-down'), 300);
+    }
+}
+
+function updateConnectionStatus(connected) {
+    const dot = document.getElementById('connectionDot');
+    const text = document.getElementById('connectionText');
+
+    if (connected) {
+        dot.className = 'w-2 h-2 rounded-full bg-[#00ff41] animate-pulse';
+        text.textContent = 'Conectado';
+        text.className = 'text-[10px] text-[#00ff41] font-mono';
+    } else {
+        dot.className = 'w-2 h-2 rounded-full bg-red-500 animate-pulse';
+        text.textContent = 'Desconectado';
+        text.className = 'text-[10px] text-red-400 font-mono';
+    }
+}
+
+// ==================== PRICES ====================
+function renderPrices() {
+    const grid = document.getElementById('priceGrid');
+    const symbolNames = {
+        btcusdt: { name: 'BTC', full: 'Bitcoin', icon: '₿' },
+        ethusdt: { name: 'ETH', full: 'Ethereum', icon: 'Ξ' },
+        bnbusdt: { name: 'BNB', full: 'BNB Chain', icon: '◆' },
+        solusdt: { name: 'SOL', full: 'Solana', icon: '◎' },
+        xrpusdt: { name: 'XRP', full: 'Ripple', icon: '✕' },
+        dogeusdt: { name: 'DOGE', full: 'Dogecoin', icon: 'Ð' },
+        adausdt: { name: 'ADA', full: 'Cardano', icon: '₳' },
+        avaxusdt: { name: 'AVAX', full: 'Avalanche', icon: '▲' }
+    };
+
+    grid.innerHTML = Object.keys(prices).map(symbol => {
+        const info = symbolNames[symbol] || { name: symbol.replace('usdt', '').toUpperCase(), full: symbol, icon: '●' };
+        const p = prices[symbol];
+        const change = p.change24h || 0;
+        const priceDisplay = formatPrice(p.price || 0);
+
+        return `
+            <div id="price-${symbol}" class="price-card glass-card rounded-lg p-3 cursor-pointer hover:border-gray-600/50 transition">
+                <div class="flex items-center justify-between mb-1">
+                    <div class="flex items-center gap-2">
+                        <span class="text-gray-500 text-xs font-mono">${info.icon}</span>
+                        <span class="text-white text-sm font-semibold">${info.name}</span>
+                    </div>
+                    <span class="price-change text-xs font-mono ${change >= 0 ? 'text-[#00ff41]' : 'text-red-400'}">
+                        ${change >= 0 ? '+' : ''}${change.toFixed(2)}%
+                    </span>
+                </div>
+                <p class="price-value text-lg font-bold font-mono ${change >= 0 ? 'price-up' : 'price-down'}">
+                    ${priceDisplay}
+                </p>
+                <p class="text-[10px] text-gray-600 font-mono mt-0.5">${info.full}/USDT</p>
+            </div>
+        `;
+    }).join('');
+}
+
+function formatPrice(price) {
+    if (price >= 1000) return '$' + price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    if (price >= 1) return '$' + price.toFixed(4);
+    return '$' + price.toFixed(6);
+}
+
+// ==================== SIGNALS ====================
+function handleNewSignal(signal) {
+    signals.unshift(signal);
+    if (signals.length > 50) signals = signals.slice(0, 50);
+
+    todaySignalCount++;
+    renderSignals();
+    updateStats();
+    updateRiskSemaphore(signal);
+    saveSignalToFirestore(signal);
+
+    // Alert based on mode
+    if (isPresent) {
+        triggerVisualAlert(signal);
+        playAlertSound(signal);
+    } else {
+        // In Away mode, signal is saved to Firestore and push notification would fire via Cloud Functions
+        showToast(`📡 Señal ${signal.direction}: ${signal.symbol} @ ${formatPrice(signal.price)}`, signal.direction === 'BUY' ? 'success' : 'error');
+    }
+
+    // Add to history
+    addToHistory(signal);
+}
+
+function renderSignals() {
+    const list = document.getElementById('signalsList');
+    const activeSignals = signals.filter(s => !s.expired);
+    const expiredSignals = signals.filter(s => s.expired).slice(0, 5);
+
+    document.getElementById('activeSignalsCount').textContent = activeSignals.length;
+
+    if (signals.length === 0) {
+        list.innerHTML = `
+            <div class="text-center py-12">
+                <i class="fas fa-satellite-dish text-gray-700 text-4xl mb-3"></i>
+                <p class="text-gray-600 text-sm">Esperando señales del mercado...</p>
+                <p class="text-gray-700 text-xs mt-1">Las señales aparecerán aquí cuando el motor detecte oportunidades</p>
+            </div>`;
+        return;
+    }
+
+    list.innerHTML = [
+        ...activeSignals.map(s => renderSignalCard(s, false)),
+        ...expiredSignals.map(s => renderSignalCard(s, true))
+    ].join('');
+
+    // Start countdown timers for active signals
+    activeSignals.forEach(s => startCountdown(s));
+}
+
+function renderSignalCard(signal, expired) {
+    const isBuy = signal.direction === 'BUY';
+    const elapsed = Math.floor((Date.now() - signal.timestamp) / 1000);
+    const remaining = Math.max(0, 120 - elapsed);
+    const progress = Math.max(0, (remaining / 120) * 100);
+
+    let timerClass = 'countdown-fresh';
+    if (remaining < 30) timerClass = 'countdown-hot';
+    else if (remaining < 60) timerClass = 'countdown-warm';
+    if (expired || remaining === 0) timerClass = 'countdown-expired';
+
+    const riskColors = {
+        green: { bg: 'bg-green-500/20', text: 'text-green-400', label: '🟢 Seguro' },
+        yellow: { bg: 'bg-yellow-500/20', text: 'text-yellow-400', label: '🟡 Precaución' },
+        red: { bg: 'bg-red-500/20', text: 'text-red-400', label: '🔴 Peligro' }
+    };
+    const risk = riskColors[signal.riskLevel] || riskColors.yellow;
+
+    return `
+        <div class="signal-card ${isBuy ? 'buy' : 'sell'} ${expired ? 'expired' : ''} glass-card rounded-xl p-4" id="signal-${signal.id}">
+            <div class="flex items-center justify-between mb-2">
+                <div class="flex items-center gap-2">
+                    <span class="px-2.5 py-1 rounded-lg text-xs font-bold ${isBuy ? 'bg-[#00ff41]/15 text-[#00ff41]' : 'bg-red-500/15 text-red-400'}">
+                        <i class="fas fa-${isBuy ? 'arrow-up' : 'arrow-down'} mr-1"></i>${signal.direction}
+                    </span>
+                    <span class="text-white font-bold text-sm">${signal.symbol}</span>
+                    <span class="px-2 py-0.5 rounded-full text-[10px] ${risk.bg} ${risk.text}">${risk.label}</span>
+                </div>
+                <div class="text-right">
+                    <p class="text-white font-bold font-mono text-sm">${formatPrice(signal.price)}</p>
+                    ${expired ? '<span class="text-[10px] text-gray-600">EXPIRADA</span>' : `<span class="text-[10px] text-gray-500 font-mono" id="timer-${signal.id}">${formatTime(remaining)}</span>`}
+                </div>
+            </div>
+
+            <!-- Countdown bar -->
+            <div class="countdown-bar bg-gray-800 rounded-full mb-3" style="height: 3px">
+                <div class="${timerClass} rounded-full" style="width: ${progress}%; height: 100%; transition: width 1s linear" id="bar-${signal.id}"></div>
+            </div>
+
+            <!-- Indicators -->
+            <div class="grid grid-cols-4 gap-2 mb-2">
+                <div class="text-center">
+                    <p class="text-[10px] text-gray-600 uppercase">RSI</p>
+                    <p class="text-xs font-mono ${signal.rsi < 30 ? 'text-[#00ff41]' : signal.rsi > 70 ? 'text-red-400' : 'text-gray-300'}">${signal.rsi}</p>
+                </div>
+                <div class="text-center">
+                    <p class="text-[10px] text-gray-600 uppercase">EMA 9</p>
+                    <p class="text-xs font-mono text-gray-300">${formatPrice(signal.ema9)}</p>
+                </div>
+                <div class="text-center">
+                    <p class="text-[10px] text-gray-600 uppercase">EMA 21</p>
+                    <p class="text-xs font-mono text-gray-300">${formatPrice(signal.ema21)}</p>
+                </div>
+                <div class="text-center">
+                    <p class="text-[10px] text-gray-600 uppercase">Vol</p>
+                    <p class="text-xs font-mono ${signal.volumeSpike ? 'text-amber-400' : 'text-gray-300'}">${signal.volume}x</p>
+                </div>
+            </div>
+
+            <!-- Strength bar -->
+            <div class="flex items-center gap-2 mb-2">
+                <span class="text-[10px] text-gray-600">Fuerza:</span>
+                <div class="strength-bar flex-1">
+                    <div class="strength-fill ${isBuy ? 'bg-[#00ff41]' : 'bg-red-500'}" style="width: ${signal.strength.value}%"></div>
+                </div>
+                <span class="text-[10px] font-mono ${signal.strength.value >= 70 ? 'text-[#00ff41]' : signal.strength.value >= 40 ? 'text-amber-400' : 'text-red-400'}">${signal.strength.value}%</span>
+            </div>
+
+            <!-- ELI5 Reasons -->
+            ${signal.eli5Reasons && signal.eli5Reasons.length > 0 ? `
+                <div class="mt-2 pt-2 border-t border-gray-800/50">
+                    <p class="text-[10px] text-gray-600 mb-1"><i class="fas fa-lightbulb text-amber-500 mr-1"></i>¿Qué significa?</p>
+                    ${signal.eli5Reasons.map(r => `<p class="text-[11px] text-gray-400 leading-relaxed">${r}</p>`).join('')}
+                </div>
+            ` : ''}
+
+            <!-- Support/Resistance -->
+            <div class="flex items-center gap-4 mt-2 pt-2 border-t border-gray-800/50 text-[10px]">
+                <span class="text-gray-600"><i class="fas fa-level-down-alt text-[#00ff41] mr-1"></i>Soporte: <span class="text-gray-400 font-mono">${formatPrice(signal.support)}</span></span>
+                <span class="text-gray-600"><i class="fas fa-level-up-alt text-red-400 mr-1"></i>Resistencia: <span class="text-gray-400 font-mono">${formatPrice(signal.resistance)}</span></span>
+            </div>
+        </div>
+    `;
+}
+
+// ==================== COUNTDOWN ====================
+function startCountdown(signal) {
+    if (countdownIntervals[signal.id]) clearInterval(countdownIntervals[signal.id]);
+
+    countdownIntervals[signal.id] = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - signal.timestamp) / 1000);
+        const remaining = Math.max(0, 120 - elapsed);
+        const progress = Math.max(0, (remaining / 120) * 100);
+
+        const timerEl = document.getElementById(`timer-${signal.id}`);
+        const barEl = document.getElementById(`bar-${signal.id}`);
+
+        if (timerEl) timerEl.textContent = formatTime(remaining);
+        if (barEl) {
+            barEl.style.width = `${progress}%`;
+            barEl.className = remaining <= 0 ? 'countdown-expired rounded-full' 
+                : remaining < 30 ? 'countdown-hot rounded-full' 
+                : remaining < 60 ? 'countdown-warm rounded-full' 
+                : 'countdown-fresh rounded-full';
+            barEl.style.height = '100%';
+            barEl.style.transition = 'width 1s linear';
+        }
+
+        if (remaining <= 0) {
+            clearInterval(countdownIntervals[signal.id]);
+            signal.expired = true;
+            const card = document.getElementById(`signal-${signal.id}`);
+            if (card) card.classList.add('expired');
+            updateStats();
+        }
+    }, 1000);
+}
+
+function formatTime(seconds) {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+// ==================== RISK SEMAPHORE ====================
+function updateRiskSemaphore(signal) {
+    const greenEl = document.getElementById('riskGreen');
+    const yellowEl = document.getElementById('riskYellow');
+    const redEl = document.getElementById('riskRed');
+    const msgEl = document.getElementById('riskMessage');
+
+    // Reset all
+    [greenEl, yellowEl, redEl].forEach(el => {
+        el.classList.remove('active-green', 'active-yellow', 'active-red');
+    });
+
+    const isBuy = signal.direction === 'BUY';
+
+    if (signal.riskLevel === 'green') {
+        greenEl.classList.add('active-green');
+        msgEl.innerHTML = `<span class="text-green-400 font-semibold">🟢 Señal segura.</span> ${isBuy ? 'Buen momento para considerar compra.' : 'Buen momento para considerar venta.'}`;
+    } else if (signal.riskLevel === 'yellow') {
+        yellowEl.classList.add('active-yellow');
+        msgEl.innerHTML = `<span class="text-yellow-400 font-semibold">🟡 Precaución.</span> La señal es moderada. ${isBuy ? 'Puedes comprar pero con un stop loss ajustado.' : 'Puedes vender pero vigila de cerca.'}`;
+    } else {
+        redEl.classList.add('active-red');
+        msgEl.innerHTML = `<span class="text-red-400 font-semibold">🔴 ¡Peligro!</span> Señal débil. No es recomendable entrar ahora. Espera una mejor oportunidad.`;
+    }
+}
+
+// ==================== PRESENT/AWAY MODE ====================
+function toggleMode() {
+    isPresent = !isPresent;
+    const toggle = document.getElementById('modeToggle');
+    const label = document.getElementById('modeLabel');
+    const icon = document.getElementById('modeIcon');
+
+    if (isPresent) {
+        toggle.classList.add('active');
+        label.textContent = 'Presente';
+        label.className = 'text-xs text-[#00ff41] hidden sm:inline';
+        icon.className = 'fas fa-sun text-[8px]';
+        showToast('🔊 Modo Presente activado. Recibirás alertas sonoras y visuales.', 'success');
+    } else {
+        toggle.classList.remove('active');
+        label.textContent = 'Away';
+        label.className = 'text-xs text-gray-400 hidden sm:inline';
+        icon.className = 'fas fa-moon text-[8px] text-gray-700';
+        showToast('📱 Modo Away activado. Recibirás notificaciones Push.', 'info');
+    }
+}
+
+// ==================== ALERTS ====================
+function initAudio() {
+    // Create audio context for alert sounds
+    alertAudio = new (window.AudioContext || window.webkitAudioContext)();
+}
+
+function playAlertSound(signal) {
+    if (!alertAudio || !isPresent) return;
+
+    try {
+        const oscillator = alertAudio.createOscillator();
+        const gainNode = alertAudio.createGain();
+
+        oscillator.connect(gainNode);
+        gainNode.connect(alertAudio.destination);
+
+        if (signal.direction === 'BUY') {
+            // Ascending tone for BUY
+            oscillator.frequency.setValueAtTime(440, alertAudio.currentTime);
+            oscillator.frequency.linearRampToValueAtTime(880, alertAudio.currentTime + 0.3);
+            oscillator.type = 'sine';
+        } else {
+            // Descending tone for SELL
+            oscillator.frequency.setValueAtTime(880, alertAudio.currentTime);
+            oscillator.frequency.linearRampToValueAtTime(440, alertAudio.currentTime + 0.3);
+            oscillator.type = 'sine';
+        }
+
+        gainNode.gain.setValueAtTime(0.3, alertAudio.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, alertAudio.currentTime + 0.5);
+
+        oscillator.start(alertAudio.currentTime);
+        oscillator.stop(alertAudio.currentTime + 0.5);
+    } catch (e) {
+        console.log('Audio alert failed:', e);
+    }
+}
+
+function triggerVisualAlert(signal) {
+    if (!isPresent) return;
+
+    const overlay = document.getElementById('alertOverlay');
+    const flash = overlay.querySelector('.signal-flash');
+
+    overlay.classList.remove('hidden');
+    flash.classList.remove('flash-buy', 'flash-sell');
+    
+    setTimeout(() => {
+        flash.classList.add(signal.direction === 'BUY' ? 'flash-buy' : 'flash-sell');
+    }, 10);
+
+    setTimeout(() => {
+        overlay.classList.add('hidden');
+        flash.classList.remove('flash-buy', 'flash-sell');
+    }, 2000);
+}
+
+// ==================== FIRESTORE ====================
+async function saveSignalToFirestore(signal) {
+    try {
+        await db.collection('signals').add({
+            ...signal,
+            timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+            userId: auth.currentUser?.uid
+        });
+    } catch (error) {
+        console.error('Error saving signal to Firestore:', error);
+    }
+}
+
+// ==================== SIGNAL HISTORY ====================
+function addToHistory(signal) {
+    const container = document.getElementById('signalHistory');
+    const isBuy = signal.direction === 'BUY';
+    const time = new Date(signal.timestamp).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    const entry = document.createElement('div');
+    entry.className = 'flex items-center justify-between py-1.5 px-2 rounded-lg bg-gray-800/30 animate-slide-in';
+    entry.innerHTML = `
+        <div class="flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full ${isBuy ? 'bg-[#00ff41]' : 'bg-red-500'}"></span>
+            <span class="text-xs text-white font-medium">${signal.symbol}</span>
+            <span class="text-[10px] ${isBuy ? 'text-[#00ff41]' : 'text-red-400'}">${signal.direction}</span>
+        </div>
+        <div class="flex items-center gap-2">
+            <span class="text-xs text-gray-400 font-mono">${formatPrice(signal.price)}</span>
+            <span class="text-[10px] text-gray-600">${time}</span>
+        </div>
+    `;
+
+    // Remove placeholder
+    if (container.querySelector('p')) container.innerHTML = '';
+
+    container.prepend(entry);
+
+    // Keep max 20 entries
+    while (container.children.length > 20) {
+        container.lastChild.remove();
+    }
+}
+
+// ==================== STATS ====================
+function updateStats() {
+    const active = signals.filter(s => !s.expired).length;
+    document.getElementById('activeSignalsCount').textContent = active;
+    document.getElementById('todaySignalsCount').textContent = todaySignalCount;
+    document.getElementById('pairsCount').textContent = Object.keys(prices).length || 8;
+}
+
+// ==================== HELP MODAL ====================
+function toggleHelp() {
+    const modal = document.getElementById('helpModal');
+    modal.classList.toggle('hidden');
+}
+
+// Close help on backdrop click
+document.getElementById('helpModal')?.addEventListener('click', (e) => {
+    if (e.target === document.getElementById('helpModal')) {
+        toggleHelp();
+    }
+});
+
+// ==================== TOAST ====================
+function showToast(message, type = 'info') {
+    const container = document.getElementById('toastContainer');
+    const colors = {
+        success: 'bg-[#00ff41]/90 text-black',
+        error: 'bg-red-500/90 text-white',
+        warning: 'bg-amber-500/90 text-black',
+        info: 'bg-blue-500/90 text-white'
+    };
+    const icons = {
+        success: 'check-circle',
+        error: 'times-circle',
+        warning: 'exclamation-triangle',
+        info: 'info-circle'
+    };
+
+    const toast = document.createElement('div');
+    toast.className = `toast ${colors[type] || colors.info} px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2 text-sm font-medium max-w-sm`;
+    toast.innerHTML = `<i class="fas fa-${icons[type] || icons.info}"></i><span>${message}</span>`;
+    container.appendChild(toast);
+
+    setTimeout(() => {
+        toast.classList.add('toast-exit');
+        setTimeout(() => toast.remove(), 300);
+    }, 4000);
+}
+
+// ==================== KEYBOARD SHORTCUTS ====================
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        const helpModal = document.getElementById('helpModal');
+        if (!helpModal.classList.contains('hidden')) toggleHelp();
+    }
+    // Toggle mode with 'P' key
+    if (e.key === 'p' && !e.target.matches('input, textarea')) {
+        toggleMode();
+    }
+});
+
+console.log(`
+╔══════════════════════════════════════════╗
+║     ⚡ AlphaSignal Pro v1.0             ║
+║     Frontend Loaded Successfully        ║
+╚══════════════════════════════════════════╝
+`);
