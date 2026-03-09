@@ -23,6 +23,7 @@ const BINANCE_WS_BASE = 'wss://stream.binance.com:9443/ws';
 const BINANCE_API = 'https://api.binance.com/api/v3';
 const SYMBOLS = ['btcusdt', 'ethusdt', 'bnbusdt', 'solusdt', 'xrpusdt', 'dogeusdt', 'adausdt', 'avaxusdt'];
 const KLINE_INTERVAL = '1m';
+const ADMIN_EMAIL = 'f1098749586@gmail.com';
 
 // ==================== STATE ====================
 let binanceWs = null;
@@ -37,16 +38,41 @@ let alertAudio = null;
 let signalEngine = null;
 
 // ==================== INIT ====================
+let isAdmin = false;
+let allUsers = [];
+
 auth.onAuthStateChanged(async (user) => {
     if (user) {
+        isAdmin = user.email === ADMIN_EMAIL;
+
+        // Check if user is approved (admin always approved)
+        if (!isAdmin) {
+            const userDoc = await db.collection('users').doc(user.uid).get();
+            if (userDoc.exists && userDoc.data().active === false) {
+                auth.signOut();
+                const errorEl = document.getElementById('loginError');
+                errorEl.textContent = 'Tu cuenta está pendiente de aprobación por el administrador.';
+                errorEl.classList.remove('hidden');
+                return;
+            }
+        }
+
         showDashboard();
         connectWebSocket();
         initAudio();
         requestNotificationPermission();
         await loadTrackRecordFromFirestore();
         await loadLessonsFromFirestore();
+
+        // Show admin tab if admin
+        if (isAdmin) {
+            const adminTab = document.getElementById('tab-admin');
+            if (adminTab) adminTab.classList.remove('hidden');
+        }
     } else {
         showLogin();
+        const adminTab = document.getElementById('tab-admin');
+        if (adminTab) adminTab.classList.add('hidden');
     }
 });
 
@@ -151,14 +177,19 @@ async function handleRegister() {
 
     try {
         const cred = await auth.createUserWithEmailAndPassword(email, password);
-        // Save user profile to Firestore
+        // Save user profile to Firestore - pending approval
         await db.collection('users').doc(cred.user.uid).set({
             email: email,
             createdAt: firebase.firestore.FieldValue.serverTimestamp(),
             plan: 'free',
-            active: true
+            active: false
         });
-        showToast('🎉 ¡Cuenta creada exitosamente!', 'success');
+        // Sign out immediately - needs admin approval
+        await auth.signOut();
+        const errorEl = document.getElementById('loginError');
+        errorEl.textContent = '';
+        errorEl.classList.add('hidden');
+        showToast('🎉 Cuenta creada. El administrador debe aprobarla para que puedas ingresar.', 'warning');
     } catch (error) {
         let msg = 'Error al crear cuenta';
         if (error.code === 'auth/email-already-in-use') msg = 'Este correo ya tiene una cuenta';
@@ -833,7 +864,7 @@ document.addEventListener('keydown', (e) => {
 
 // ==================== TAB NAVIGATION ====================
 function switchTab(tabName) {
-    const views = ['dashboard', 'chart', 'trackrecord', 'academia', 'config'];
+    const views = ['dashboard', 'chart', 'trackrecord', 'academia', 'config', 'admin'];
     views.forEach(v => {
         const el = document.getElementById(`view-${v}`);
         const btn = document.getElementById(`tab-${v}`);
@@ -846,6 +877,143 @@ function switchTab(tabName) {
     if (tabName === 'trackrecord') renderTrackRecord();
     if (tabName === 'academia') loadAcademiaProgress();
     if (tabName === 'config') loadConfigValues();
+    if (tabName === 'admin' && isAdmin) loadAdminUsers();
+}
+
+// ==================== ADMIN PANEL ====================
+async function loadAdminUsers() {
+    if (!isAdmin) return;
+    const container = document.getElementById('adminUserList');
+    container.innerHTML = '<p class="text-gray-600 text-xs text-center py-4"><i class="fas fa-spinner fa-spin"></i> Cargando...</p>';
+
+    try {
+        const snap = await db.collection('users').get();
+        allUsers = snap.docs.map(doc => ({ uid: doc.id, ...doc.data() }));
+        renderAdminUsers(allUsers);
+    } catch (e) {
+        console.error('Error loading users:', e);
+        container.innerHTML = '<p class="text-red-400 text-xs text-center py-4">Error al cargar usuarios</p>';
+    }
+}
+
+function renderAdminUsers(users) {
+    const container = document.getElementById('adminUserList');
+    const total = users.length;
+    const active = users.filter(u => u.active === true).length;
+    const pending = users.filter(u => u.active === false).length;
+    const blocked = users.filter(u => u.active === 'blocked').length;
+
+    document.getElementById('adminTotalUsers').textContent = total;
+    document.getElementById('adminActiveUsers').textContent = active;
+    document.getElementById('adminPendingUsers').textContent = pending;
+    document.getElementById('adminBlockedUsers').textContent = blocked;
+
+    if (users.length === 0) {
+        container.innerHTML = '<p class="text-gray-600 text-xs text-center py-8">No hay usuarios registrados</p>';
+        return;
+    }
+
+    container.innerHTML = users.map(u => {
+        const isAdminUser = u.email === ADMIN_EMAIL;
+        const date = u.createdAt ? new Date(u.createdAt.seconds * 1000).toLocaleDateString('es-CO', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A';
+        
+        let statusBadge, statusColor;
+        if (isAdminUser) {
+            statusBadge = '<span class="px-2 py-0.5 rounded-full text-[10px] bg-amber-500/20 text-amber-400"><i class="fas fa-crown mr-1"></i>Admin</span>';
+            statusColor = 'border-amber-500/20';
+        } else if (u.active === true) {
+            statusBadge = '<span class="px-2 py-0.5 rounded-full text-[10px] bg-[#00ff41]/15 text-[#00ff41]"><i class="fas fa-check-circle mr-1"></i>Activo</span>';
+            statusColor = 'border-[#00ff41]/20';
+        } else if (u.active === 'blocked') {
+            statusBadge = '<span class="px-2 py-0.5 rounded-full text-[10px] bg-red-500/15 text-red-400"><i class="fas fa-ban mr-1"></i>Bloqueado</span>';
+            statusColor = 'border-red-500/20';
+        } else {
+            statusBadge = '<span class="px-2 py-0.5 rounded-full text-[10px] bg-amber-500/15 text-amber-400"><i class="fas fa-clock mr-1"></i>Pendiente</span>';
+            statusColor = 'border-amber-500/20';
+        }
+
+        const planBadge = u.plan === 'premium'
+            ? '<span class="px-2 py-0.5 rounded-full text-[10px] bg-purple-500/15 text-purple-400">Premium</span>'
+            : '<span class="px-2 py-0.5 rounded-full text-[10px] bg-gray-700/50 text-gray-400">Free</span>';
+
+        const actions = isAdminUser ? '' : `
+            <div class="flex items-center gap-1 mt-2">
+                ${u.active !== true ? `<button onclick="adminSetUserStatus('${u.uid}', true)" class="px-2 py-1 text-[10px] rounded bg-[#00ff41]/15 text-[#00ff41] hover:bg-[#00ff41]/25 transition"><i class="fas fa-check"></i> Aprobar</button>` : ''}
+                ${u.active !== 'blocked' ? `<button onclick="adminSetUserStatus('${u.uid}', 'blocked')" class="px-2 py-1 text-[10px] rounded bg-red-500/15 text-red-400 hover:bg-red-500/25 transition"><i class="fas fa-ban"></i> Bloquear</button>` : ''}
+                ${u.active === 'blocked' ? `<button onclick="adminSetUserStatus('${u.uid}', true)" class="px-2 py-1 text-[10px] rounded bg-[#00ff41]/15 text-[#00ff41] hover:bg-[#00ff41]/25 transition"><i class="fas fa-unlock"></i> Desbloquear</button>` : ''}
+                <button onclick="adminSetUserPlan('${u.uid}', '${u.plan === 'premium' ? 'free' : 'premium'}')" class="px-2 py-1 text-[10px] rounded bg-purple-500/15 text-purple-400 hover:bg-purple-500/25 transition"><i class="fas fa-star"></i> ${u.plan === 'premium' ? 'Quitar Premium' : 'Dar Premium'}</button>
+                <button onclick="adminDeleteUser('${u.uid}', '${u.email}')" class="px-2 py-1 text-[10px] rounded bg-red-900/30 text-red-500 hover:bg-red-900/50 transition"><i class="fas fa-trash"></i></button>
+            </div>
+        `;
+
+        return `
+            <div class="bg-[#1a1a2e]/60 rounded-xl p-3 border ${statusColor}">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <div class="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center text-xs text-white font-bold">
+                            ${u.email ? u.email[0].toUpperCase() : '?'}
+                        </div>
+                        <div>
+                            <p class="text-white text-xs font-medium">${u.email || 'Sin correo'}</p>
+                            <p class="text-gray-600 text-[10px]">Registro: ${date}</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        ${planBadge}
+                        ${statusBadge}
+                    </div>
+                </div>
+                ${actions}
+            </div>
+        `;
+    }).join('');
+}
+
+function filterAdminUsers() {
+    const filter = document.getElementById('adminFilterStatus').value;
+    let filtered = allUsers;
+    if (filter === 'active') filtered = allUsers.filter(u => u.active === true);
+    else if (filter === 'pending') filtered = allUsers.filter(u => u.active === false);
+    else if (filter === 'blocked') filtered = allUsers.filter(u => u.active === 'blocked');
+    renderAdminUsers(filtered);
+}
+
+async function adminSetUserStatus(uid, status) {
+    if (!isAdmin) return;
+    try {
+        await db.collection('users').doc(uid).update({ active: status });
+        const label = status === true ? 'aprobado' : 'bloqueado';
+        showToast(`Usuario ${label} correctamente`, 'success');
+        loadAdminUsers();
+    } catch (e) {
+        console.error('Error updating user:', e);
+        showToast('Error al actualizar usuario', 'error');
+    }
+}
+
+async function adminSetUserPlan(uid, plan) {
+    if (!isAdmin) return;
+    try {
+        await db.collection('users').doc(uid).update({ plan: plan });
+        showToast(`Plan cambiado a ${plan}`, 'success');
+        loadAdminUsers();
+    } catch (e) {
+        console.error('Error updating plan:', e);
+        showToast('Error al cambiar plan', 'error');
+    }
+}
+
+async function adminDeleteUser(uid, email) {
+    if (!isAdmin) return;
+    if (!confirm(`\u00bfSeguro que quieres eliminar a ${email}? Esta acci\u00f3n no se puede deshacer.`)) return;
+    try {
+        await db.collection('users').doc(uid).delete();
+        showToast(`Usuario ${email} eliminado`, 'info');
+        loadAdminUsers();
+    } catch (e) {
+        console.error('Error deleting user:', e);
+        showToast('Error al eliminar usuario', 'error');
+    }
 }
 
 // ==================== TRADINGVIEW LIGHTWEIGHT CHART ====================
