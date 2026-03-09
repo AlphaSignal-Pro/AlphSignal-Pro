@@ -67,19 +67,31 @@ auth.onAuthStateChanged(async (user) => {
         if (!isAdmin) {
             try {
                 const userDoc = await db.collection('users').doc(user.uid).get();
-                if (userDoc.exists) {
-                    const data = userDoc.data();
-                    if (data.active === false || data.active === 'blocked') {
-                        auth.signOut();
-                        const errorEl = document.getElementById('loginError');
-                        errorEl.textContent = data.active === 'blocked'
-                            ? 'Tu cuenta ha sido bloqueada. Contacta al administrador.'
-                            : 'Tu cuenta está pendiente de aprobación por el administrador.';
-                        errorEl.classList.remove('hidden');
-                        return;
+                const data = userDoc.exists ? userDoc.data() : null;
+                
+                // Block if: no document, active is false, active is 'blocked', or active is not exactly true
+                if (!data || data.active !== true) {
+                    let msg = 'Tu cuenta está pendiente de aprobación por el administrador.';
+                    if (data && data.active === 'blocked') {
+                        msg = 'Tu cuenta ha sido bloqueada. Contacta al administrador.';
                     }
+                    await auth.signOut();
+                    const errorEl = document.getElementById('loginError');
+                    errorEl.textContent = msg;
+                    errorEl.classList.remove('hidden');
+                    console.log('🚫 Acceso denegado:', user.email, '| active:', data?.active);
+                    return;
                 }
-            } catch (e) { console.error('Error checking user status:', e); }
+                console.log('✅ Usuario aprobado:', user.email);
+            } catch (e) {
+                console.error('Error checking user status:', e);
+                // If we can't verify, block access for safety
+                await auth.signOut();
+                const errorEl = document.getElementById('loginError');
+                errorEl.textContent = 'Error al verificar tu cuenta. Intenta de nuevo.';
+                errorEl.classList.remove('hidden');
+                return;
+            }
         }
 
         showDashboard();
@@ -613,6 +625,23 @@ function renderSignalCard(signal, expired) {
                 <span class="text-gray-600"><i class="fas fa-level-down-alt text-[#00ff41] mr-1"></i>Soporte: <span class="text-gray-400 font-mono">${formatPrice(signal.support)}</span></span>
                 <span class="text-gray-600"><i class="fas fa-level-up-alt text-red-400 mr-1"></i>Resistencia: <span class="text-gray-400 font-mono">${formatPrice(signal.resistance)}</span></span>
             </div>
+
+            <!-- XM Action Button -->
+            ${!expired && signal.riskLevel !== 'red' ? `
+            <button onclick='showSignalXmGuide(${JSON.stringify({
+                symbol: signal.symbol,
+                direction: signal.direction,
+                price: signal.price,
+                support: signal.support,
+                resistance: signal.resistance,
+                riskLevel: signal.riskLevel,
+                strength: signal.strength.value,
+                rsi: signal.rsi
+            }).replace(/'/g, "&#39;")})' 
+            class="w-full mt-3 py-2 text-[11px] font-medium rounded-lg ${isBuy ? 'bg-[#00ff41]/10 text-[#00ff41] hover:bg-[#00ff41]/20' : 'bg-red-500/10 text-red-400 hover:bg-red-500/20'} transition flex items-center justify-center gap-2">
+                <i class="fas fa-book-open"></i> ¿Cómo opero esto en XM?
+            </button>
+            ` : ''}
         </div>
     `;
 }
@@ -909,6 +938,175 @@ document.getElementById('xmGuideModal')?.addEventListener('click', (e) => {
         toggleXmGuide();
     }
 });
+
+// Contextual XM guide for a specific signal
+function showSignalXmGuide(signal) {
+    const isBuy = signal.direction === 'BUY';
+    const xmSymbol = signal.symbol.replace('USDT', 'USD');
+    const price = signal.price;
+
+    // Calculate TP and SL based on support/resistance and direction
+    let tp, sl, tpDistance, slDistance;
+    if (isBuy) {
+        sl = signal.support;
+        tp = signal.resistance;
+        slDistance = price - sl;
+        tpDistance = tp - price;
+    } else {
+        sl = signal.resistance;
+        tp = signal.support;
+        slDistance = sl - price;
+        tpDistance = price - tp;
+    }
+
+    // Risk/Reward ratio
+    const rr = slDistance > 0 ? (tpDistance / slDistance).toFixed(1) : '—';
+
+    // Lot recommendation based on risk level and strength
+    let lotRec, lotExplain;
+    if (signal.riskLevel === 'green' && signal.strength >= 70) {
+        lotRec = '0.03 - 0.05';
+        lotExplain = 'Señal fuerte y segura. Puedes usar un lote moderado.';
+    } else if (signal.riskLevel === 'green') {
+        lotRec = '0.02 - 0.03';
+        lotExplain = 'Señal segura pero moderada. Lote conservador recomendado.';
+    } else {
+        lotRec = '0.01 - 0.02';
+        lotExplain = 'Señal con precaución. Usa el lote mínimo para proteger tu capital.';
+    }
+
+    // Estimated profit/loss with 0.03 lots
+    const pipValue = price >= 1000 ? 0.01 : price >= 1 ? 0.0001 : 0.000001;
+    const estProfit = (tpDistance * 0.03 / pipValue * 0.01).toFixed(2);
+    const estLoss = (slDistance * 0.03 / pipValue * 0.01).toFixed(2);
+
+    const modal = document.createElement('div');
+    modal.id = 'signalXmModal';
+    modal.className = 'fixed inset-0 bg-black/90 backdrop-blur-sm z-[75] flex items-center justify-center p-4';
+    modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+
+    modal.innerHTML = `
+        <div class="glass-card rounded-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto custom-scrollbar">
+            <div class="sticky top-0 bg-[#12121a] p-4 border-b border-gray-800/50 rounded-t-2xl z-10">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h2 class="text-sm font-bold text-white flex items-center gap-2">
+                            <span class="px-2 py-0.5 rounded text-xs font-bold ${isBuy ? 'bg-[#00ff41]/15 text-[#00ff41]' : 'bg-red-500/15 text-red-400'}">
+                                <i class="fas fa-${isBuy ? 'arrow-up' : 'arrow-down'} mr-1"></i>${signal.direction}
+                            </span>
+                            ${signal.symbol} → ${xmSymbol} en XM
+                        </h2>
+                        <p class="text-gray-500 text-[10px] mt-1">Guía específica para esta señal</p>
+                    </div>
+                    <button onclick="this.closest('#signalXmModal').remove()" class="text-gray-400 hover:text-white transition text-lg">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="p-4 space-y-4">
+
+                <!-- Signal Summary -->
+                <div class="bg-${isBuy ? '[#00ff41]' : 'red-500'}/5 border border-${isBuy ? '[#00ff41]' : 'red-500'}/20 rounded-xl p-3">
+                    <div class="grid grid-cols-3 gap-3 text-center">
+                        <div>
+                            <p class="text-[10px] text-gray-500 uppercase">Entrada</p>
+                            <p class="text-white text-sm font-bold font-mono">${formatPrice(price)}</p>
+                        </div>
+                        <div>
+                            <p class="text-[10px] text-gray-500 uppercase">Take Profit</p>
+                            <p class="text-[#00ff41] text-sm font-bold font-mono">${formatPrice(tp)}</p>
+                        </div>
+                        <div>
+                            <p class="text-[10px] text-gray-500 uppercase">Stop Loss</p>
+                            <p class="text-red-400 text-sm font-bold font-mono">${formatPrice(sl)}</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center justify-center gap-4 mt-2 pt-2 border-t border-gray-800/30">
+                        <span class="text-[10px] text-gray-400">R/R: <strong class="text-white">${rr}:1</strong></span>
+                        <span class="text-[10px] text-gray-400">Lotes: <strong class="text-amber-400">${lotRec}</strong></span>
+                        <span class="text-[10px] text-gray-400">Riesgo: <strong class="${signal.riskLevel === 'green' ? 'text-[#00ff41]' : 'text-amber-400'}">${signal.riskLevel === 'green' ? 'Bajo' : 'Moderado'}</strong></span>
+                    </div>
+                </div>
+
+                <!-- Step 1 -->
+                <div class="flex gap-3">
+                    <div class="w-6 h-6 rounded-full bg-[#00ff41] flex items-center justify-center text-black font-bold text-[10px] shrink-0 mt-0.5">1</div>
+                    <div>
+                        <p class="text-white text-xs font-bold">Abre XM → Mercados → busca "${xmSymbol}"</p>
+                        <p class="text-gray-400 text-[11px] mt-1">Usa la lupa 🔍 y escribe <strong class="text-white">${xmSymbol}</strong>. Tócalo para abrir el gráfico.</p>
+                    </div>
+                </div>
+
+                <!-- Step 2 -->
+                <div class="flex gap-3">
+                    <div class="w-6 h-6 rounded-full bg-[#00ff41] flex items-center justify-center text-black font-bold text-[10px] shrink-0 mt-0.5">2</div>
+                    <div>
+                        <p class="text-white text-xs font-bold">Toca el botón ${isBuy ? '<span class="text-[#00ff41]">COMPRA</span> (verde)' : '<span class="text-red-400">VENTA</span> (rojo)'}</p>
+                        <p class="text-gray-400 text-[11px] mt-1">Abajo del gráfico verás dos botones grandes. Toca el de la ${isBuy ? 'derecha (COMPRA)' : 'izquierda (VENTA)'}.</p>
+                    </div>
+                </div>
+
+                <!-- Step 3 -->
+                <div class="flex gap-3">
+                    <div class="w-6 h-6 rounded-full bg-[#00ff41] flex items-center justify-center text-black font-bold text-[10px] shrink-0 mt-0.5">3</div>
+                    <div>
+                        <p class="text-white text-xs font-bold">Configura los lotes: <span class="text-amber-400">${lotRec}</span></p>
+                        <p class="text-gray-400 text-[11px] mt-1">${lotExplain}</p>
+                        <p class="text-gray-400 text-[11px] mt-1">Selecciona <strong class="text-white">"Lotes"</strong> arriba y ajusta con los botones + y -.</p>
+                    </div>
+                </div>
+
+                <!-- Step 4 -->
+                <div class="flex gap-3">
+                    <div class="w-6 h-6 rounded-full bg-amber-500 flex items-center justify-center text-black font-bold text-[10px] shrink-0 mt-0.5">4</div>
+                    <div>
+                        <p class="text-white text-xs font-bold">Activa TP/SL <span class="text-amber-400">(MUY IMPORTANTE)</span></p>
+                        <p class="text-gray-400 text-[11px] mt-1">Activa el interruptor <strong class="text-white">TP/SL</strong> y selecciona <strong class="text-white">"Precio"</strong>.</p>
+                        <div class="bg-gray-800/40 rounded-lg p-2 mt-2 space-y-1">
+                            <p class="text-[11px]"><span class="text-[#00ff41]">Take Profit:</span> <strong class="text-white font-mono">${formatPrice(tp)}</strong></p>
+                            <p class="text-[11px]"><span class="text-red-400">Stop Loss:</span> <strong class="text-white font-mono">${formatPrice(sl)}</strong></p>
+                        </div>
+                        <p class="text-gray-500 text-[10px] mt-1">Copia estos valores exactos en los campos de XM.</p>
+                    </div>
+                </div>
+
+                <!-- Step 5 -->
+                <div class="flex gap-3">
+                    <div class="w-6 h-6 rounded-full bg-[#00ff41] flex items-center justify-center text-black font-bold text-[10px] shrink-0 mt-0.5">5</div>
+                    <div>
+                        <p class="text-white text-xs font-bold">Toca "${isBuy ? 'Colocar orden en...' : 'Colocar orden en...'}" <span class="${isBuy ? 'text-[#00ff41]' : 'text-red-400'}">(${isBuy ? 'verde' : 'rojo'})</span></p>
+                        <p class="text-gray-400 text-[11px] mt-1">El botón grande de abajo. ¡Tu orden queda activa!</p>
+                    </div>
+                </div>
+
+                <!-- What to expect -->
+                <div class="bg-[#1a1a2e]/60 rounded-xl p-3 border border-gray-800/50">
+                    <p class="text-gray-500 text-[10px] uppercase font-bold mb-2">¿Qué esperar?</p>
+                    <ul class="text-[11px] text-gray-400 space-y-1">
+                        <li class="flex items-start gap-2"><span class="text-[#00ff41]">✓</span> Si el precio llega a <strong class="text-[#00ff41]">${formatPrice(tp)}</strong>, XM cierra automáticamente y ganas.</li>
+                        <li class="flex items-start gap-2"><span class="text-red-400">✗</span> Si el precio llega a <strong class="text-red-400">${formatPrice(sl)}</strong>, XM cierra automáticamente y pierdes poco.</li>
+                        <li class="flex items-start gap-2"><span class="text-blue-400">ℹ</span> Puedes cerrar manualmente en cualquier momento desde "Operaciones" en XM.</li>
+                    </ul>
+                </div>
+
+                <!-- Warning -->
+                <div class="bg-amber-900/10 border border-amber-800/20 rounded-xl p-3">
+                    <p class="text-amber-400 text-[10px] font-bold flex items-center gap-1"><i class="fas fa-exclamation-triangle"></i> Recuerda</p>
+                    <p class="text-gray-400 text-[10px] mt-1">Esta es una guía basada en el análisis automático de AlphaSignal Pro. No es consejo financiero. Siempre opera con dinero que puedas permitirte perder.</p>
+                </div>
+
+                <button onclick="this.closest('#signalXmModal').remove()" class="w-full py-2.5 text-xs font-medium rounded-xl ${isBuy ? 'bg-[#00ff41]/10 text-[#00ff41]' : 'bg-red-500/10 text-red-400'} transition">
+                    <i class="fas fa-check-circle mr-1"></i> Entendido
+                </button>
+            </div>
+        </div>
+    `;
+
+    // Remove existing modal if any
+    document.getElementById('signalXmModal')?.remove();
+    document.body.appendChild(modal);
+}
 
 // ==================== TOAST ====================
 function showToast(message, type = 'info') {
