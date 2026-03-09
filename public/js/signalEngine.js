@@ -1,6 +1,7 @@
 // ============================================
-// AlphaSignal Pro - Motor de Señales v2.0
+// AlphaSignal Pro - Motor de Señales v3.0
 // RSI + EMA(9/21/50) + ATR + MACD Real + Volume
+// + Bollinger Bands Squeeze + Market Structure
 // Filtro de tendencia + volatilidad dinámica
 // ============================================
 
@@ -103,6 +104,72 @@ class SignalEngine {
         return atr;
     }
 
+    calculateBollingerBands(closes, period = 20, stdDevMult = 2) {
+        if (closes.length < period) return null;
+        const recent = closes.slice(-period);
+        const sma = recent.reduce((a, b) => a + b, 0) / period;
+        const variance = recent.reduce((sum, val) => sum + Math.pow(val - sma, 2), 0) / period;
+        const stdDev = Math.sqrt(variance);
+        const upper = sma + stdDevMult * stdDev;
+        const lower = sma - stdDevMult * stdDev;
+        const width = (upper - lower) / sma;
+        // Calculate previous BB width to detect squeeze release
+        let prevWidth = width;
+        if (closes.length >= period + 5) {
+            const prev = closes.slice(-(period + 5), -5);
+            const prevSma = prev.reduce((a, b) => a + b, 0) / period;
+            const prevVar = prev.reduce((sum, val) => sum + Math.pow(val - prevSma, 2), 0) / period;
+            const prevStd = Math.sqrt(prevVar);
+            prevWidth = ((prevSma + stdDevMult * prevStd) - (prevSma - stdDevMult * prevStd)) / prevSma;
+        }
+        const currentPrice = closes[closes.length - 1];
+        return {
+            upper, lower, sma, width,
+            squeeze: width < 0.02,
+            squeezeRelease: prevWidth < 0.02 && width >= 0.02,
+            priceAboveMid: currentPrice > sma,
+            priceBelowMid: currentPrice < sma,
+            nearUpper: currentPrice > upper * 0.998,
+            nearLower: currentPrice < lower * 1.002
+        };
+    }
+
+    detectMarketStructure(candles) {
+        if (candles.length < 20) return { trend: 'neutral', breakout: null };
+        // Find swing highs and lows using 5-candle lookback
+        const swingHighs = [];
+        const swingLows = [];
+        for (let i = 2; i < candles.length - 2; i++) {
+            const h = candles[i].high;
+            if (h > candles[i-1].high && h > candles[i-2].high && h > candles[i+1].high && h > candles[i+2].high) {
+                swingHighs.push({ price: h, index: i });
+            }
+            const l = candles[i].low;
+            if (l < candles[i-1].low && l < candles[i-2].low && l < candles[i+1].low && l < candles[i+2].low) {
+                swingLows.push({ price: l, index: i });
+            }
+        }
+        if (swingHighs.length < 2 || swingLows.length < 2) return { trend: 'neutral', breakout: null };
+        const lastH = swingHighs[swingHighs.length - 1];
+        const prevH = swingHighs[swingHighs.length - 2];
+        const lastL = swingLows[swingLows.length - 1];
+        const prevL = swingLows[swingLows.length - 2];
+        // Determine structure
+        const higherHigh = lastH.price > prevH.price;
+        const higherLow = lastL.price > prevL.price;
+        const lowerHigh = lastH.price < prevH.price;
+        const lowerLow = lastL.price < prevL.price;
+        let trend = 'neutral';
+        if (higherHigh && higherLow) trend = 'bullish';
+        else if (lowerHigh && lowerLow) trend = 'bearish';
+        // Detect structure break
+        const currentPrice = candles[candles.length - 1].close;
+        let breakout = null;
+        if (currentPrice > lastH.price && lowerHigh) breakout = 'bullish_break';
+        if (currentPrice < lastL.price && higherLow) breakout = 'bearish_break';
+        return { trend, breakout, higherHigh, higherLow, lowerHigh, lowerLow };
+    }
+
     analyzeVolume(candles) {
         if (candles.length < 20) return { spike: false, ratio: 1 };
         const recentVol = candles.slice(-5).reduce((a, c) => a + c.volume, 0) / 5;
@@ -131,24 +198,34 @@ class SignalEngine {
 
     // ==================== STRENGTH ====================
 
-    calculateStrength(rsi, emaCross, volumeSpike, macd, trendAligned) {
+    calculateStrength(rsi, emaCross, volumeSpike, macd, trendAligned, bb, structure) {
         let score = 0;
-        // RSI in extreme zone (max 25)
-        if (rsi < 25 || rsi > 75) score += 25;
-        else if (rsi < 30 || rsi > 70) score += 20;
-        else if (rsi < 35 || rsi > 65) score += 15;
+        // RSI in extreme zone (max 20)
+        if (rsi < 25 || rsi > 75) score += 20;
+        else if (rsi < 30 || rsi > 70) score += 15;
+        else if (rsi < 35 || rsi > 65) score += 10;
         else if (rsi < 40 || rsi > 60) score += 5;
-        // EMA cross (max 20)
-        if (emaCross) score += 20;
-        // Volume confirmation (max 15)
-        if (volumeSpike) score += 15;
-        // MACD real confirmation (max 25)
+        // EMA cross (max 15)
+        if (emaCross) score += 15;
+        // Volume confirmation (max 10)
+        if (volumeSpike) score += 10;
+        // MACD real confirmation (max 20)
         if (macd) {
-            if (macd.crossUp || macd.crossDown) score += 25;
-            else if (Math.abs(macd.histogram) > 0) score += 10;
+            if (macd.crossUp || macd.crossDown) score += 20;
+            else if (Math.abs(macd.histogram) > 0) score += 8;
         }
-        // Trend alignment with EMA50 (max 15)
-        if (trendAligned) score += 15;
+        // Trend alignment with EMA50 (max 10)
+        if (trendAligned) score += 10;
+        // Bollinger Bands (max 15)
+        if (bb) {
+            if (bb.squeezeRelease) score += 15;
+            else if (bb.squeeze) score += 8;
+        }
+        // Market Structure (max 10)
+        if (structure) {
+            if (structure.breakout) score += 10;
+            else if (structure.trend !== 'neutral') score += 5;
+        }
         const percentage = Math.min(score, 100);
         if (percentage >= 75) return { value: percentage, label: 'Muy Fuerte', risk: 'low' };
         if (percentage >= 55) return { value: percentage, label: 'Fuerte', risk: 'low' };
@@ -174,6 +251,8 @@ class SignalEngine {
         const macd = this.calculateMACD(closes);
         const atr = this.calculateATR(candles);
         const volume = this.analyzeVolume(candles);
+        const bb = this.calculateBollingerBands(closes);
+        const structure = this.detectMarketStructure(candles);
         const levels = this.detectLevels(candles, atr);
 
         if (rsi === null || ema9 === null || ema21 === null) return null;
@@ -235,6 +314,32 @@ class SignalEngine {
             }
         }
 
+        // ===== BOLLINGER BANDS SQUEEZE SIGNAL =====
+        if (!direction && bb) {
+            if (bb.squeezeRelease && bb.priceAboveMid && rsi < 60) {
+                direction = 'BUY';
+                reasons.push('Squeeze de Bollinger liberado al alza');
+                eli5Reasons.push('💥 El precio estaba comprimido como un resorte y ahora explota hacia arriba');
+            } else if (bb.squeezeRelease && bb.priceBelowMid && rsi > 40) {
+                direction = 'SELL';
+                reasons.push('Squeeze de Bollinger liberado a la baja');
+                eli5Reasons.push('💥 El precio estaba comprimido como un resorte y ahora cae con fuerza');
+            }
+        }
+
+        // ===== STRUCTURE BREAK SIGNAL =====
+        if (!direction && structure.breakout) {
+            if (structure.breakout === 'bullish_break' && rsi < 65) {
+                direction = 'BUY';
+                reasons.push('Ruptura de estructura alcista (HH)');
+                eli5Reasons.push('🏗️ El precio rompió un techo importante, camino libre hacia arriba');
+            } else if (structure.breakout === 'bearish_break' && rsi > 35) {
+                direction = 'SELL';
+                reasons.push('Ruptura de estructura bajista (LL)');
+                eli5Reasons.push('🏗️ El precio rompió un piso importante, puede seguir cayendo');
+            }
+        }
+
         if (!direction) return null;
 
         // ===== MACD CONFIRMATION =====
@@ -262,6 +367,32 @@ class SignalEngine {
             eli5Reasons.push('⚠️ Cuidado: vas contra la corriente grande, más riesgo');
         }
 
+        // ===== BOLLINGER BANDS CONTEXT =====
+        if (bb) {
+            if (bb.squeeze) {
+                reasons.push('BB comprimidas (posible explosión)');
+                eli5Reasons.push('🔋 Las bandas están muy juntas: se acumula energía para un movimiento fuerte');
+            }
+            if (direction === 'BUY' && bb.nearLower) {
+                reasons.push('Precio en banda inferior de Bollinger');
+                eli5Reasons.push('📉 El precio tocó el piso de las bandas, suele rebotar');
+            } else if (direction === 'SELL' && bb.nearUpper) {
+                reasons.push('Precio en banda superior de Bollinger');
+                eli5Reasons.push('📈 El precio tocó el techo de las bandas, suele caer');
+            }
+        }
+
+        // ===== MARKET STRUCTURE CONTEXT =====
+        if (structure.trend !== 'neutral') {
+            if (direction === 'BUY' && structure.trend === 'bullish') {
+                reasons.push('Estructura de mercado alcista (HH+HL)');
+                eli5Reasons.push('📐 Los techos y pisos suben, la estructura del precio confirma compra');
+            } else if (direction === 'SELL' && structure.trend === 'bearish') {
+                reasons.push('Estructura de mercado bajista (LH+LL)');
+                eli5Reasons.push('📐 Los techos y pisos bajan, la estructura del precio confirma venta');
+            }
+        }
+
         // ===== ATR-BASED TP/SL =====
         let support = levels.support;
         let resistance = levels.resistance;
@@ -276,7 +407,7 @@ class SignalEngine {
         }
 
         const emaCross = emaCrossUp || emaCrossDown;
-        const strength = this.calculateStrength(rsi, emaCross, volume.spike, macd, trendAligned);
+        const strength = this.calculateStrength(rsi, emaCross, volume.spike, macd, trendAligned, bb, structure);
 
         // ===== RISK LEVEL =====
         let riskLevel = 'yellow';
@@ -302,6 +433,10 @@ class SignalEngine {
             macdSignal: macd ? Math.round(macd.signal * 10000) / 10000 : 0,
             macdHistogram: macd ? Math.round(macd.histogram * 10000) / 10000 : 0,
             atr: atr ? Math.round(atr * 10000) / 10000 : 0,
+            bbWidth: bb ? Math.round(bb.width * 10000) / 10000 : 0,
+            bbSqueeze: bb ? bb.squeeze : false,
+            structureTrend: structure.trend,
+            structureBreak: structure.breakout || null,
             volume: volume.ratio,
             volumeSpike: volume.spike,
             support: Math.round(support * 100) / 100,
