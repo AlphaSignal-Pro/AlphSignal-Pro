@@ -850,6 +850,18 @@ document.getElementById('helpModal')?.addEventListener('click', (e) => {
     }
 });
 
+// ==================== XM GUIDE ====================
+function toggleXmGuide() {
+    const modal = document.getElementById('xmGuideModal');
+    modal.classList.toggle('hidden');
+}
+
+document.getElementById('xmGuideModal')?.addEventListener('click', (e) => {
+    if (e.target === document.getElementById('xmGuideModal')) {
+        toggleXmGuide();
+    }
+});
+
 // ==================== TOAST ====================
 function showToast(message, type = 'info') {
     const container = document.getElementById('toastContainer');
