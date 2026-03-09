@@ -1867,11 +1867,45 @@ async function sendTelegramSignal(signal) {
 }
 
 // ==================== GEMINI AI INTEGRATION ====================
-function saveGeminiConfig() {
+async function saveGeminiConfig() {
     const key = document.getElementById('geminiApiKey').value.trim();
     if (!key) { showToast('Ingresa tu API Key de Gemini', 'warning'); return; }
-    localStorage.setItem('alphaGeminiKey', key);
-    showToast('🤖 Gemini AI activado. Las señales serán validadas con IA.', 'success');
+
+    showToast('🔄 Verificando API Key con Google...', 'info');
+
+    try {
+        const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts: [{ text: 'Responde solo: OK' }] }] }),
+        });
+
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            const msg = err?.error?.message || `Error ${resp.status}`;
+            if (resp.status === 400 || resp.status === 403) {
+                showToast('❌ API Key inválida. Verifica que la copiaste bien.', 'error');
+            } else if (resp.status === 429) {
+                showToast('⚠️ Key válida pero con límite alcanzado. Intenta más tarde.', 'warning');
+                localStorage.setItem('alphaGeminiKey', key);
+            } else {
+                showToast(`❌ Error de Google: ${msg}`, 'error');
+            }
+            return;
+        }
+
+        const data = await resp.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) {
+            localStorage.setItem('alphaGeminiKey', key);
+            showToast('✅ Gemini AI verificado y activado correctamente.', 'success');
+        } else {
+            showToast('❌ La API respondió pero sin contenido. Verifica tu key.', 'error');
+        }
+    } catch (e) {
+        showToast('❌ No se pudo conectar con Google. Verifica tu conexión.', 'error');
+        console.error('Gemini validation error:', e);
+    }
 }
 
 async function validateSignalWithGemini(signal) {
@@ -1889,7 +1923,7 @@ Riesgo: ${signal.riskLevel}
 ¿Es una buena señal? ¿Qué debería tener en cuenta el trader?`;
 
     try {
-        const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${key}`, {
+        const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
