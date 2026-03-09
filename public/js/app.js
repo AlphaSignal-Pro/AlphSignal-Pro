@@ -21,7 +21,12 @@ const db = firebase.firestore();
 // ==================== CONFIG ====================
 const BINANCE_WS_BASE = 'wss://stream.binance.com:9443/ws';
 const BINANCE_API = 'https://api.binance.com/api/v3';
-const SYMBOLS = ['btcusdt', 'ethusdt', 'bnbusdt', 'solusdt', 'xrpusdt', 'dogeusdt', 'adausdt', 'avaxusdt'];
+const SYMBOLS = [
+    'btcusdt', 'ethusdt', 'bnbusdt', 'solusdt', 'xrpusdt',
+    'dogeusdt', 'adausdt', 'avaxusdt', 'dotusdt', 'maticusdt',
+    'linkusdt', 'atomusdt', 'ltcusdt', 'nearusdt', 'aptusdt',
+    'filusdt', 'arbusdt', 'opusdt', 'injusdt', 'suiusdt'
+];
 let KLINE_INTERVAL = '1m';
 const ADMIN_EMAIL = 'f1098749586@gmail.com';
 
