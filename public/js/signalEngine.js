@@ -58,10 +58,17 @@ class SignalEngine {
         const recent = candles.slice(-20);
         const lows = recent.map(c => c.low).sort((a, b) => a - b);
         const highs = recent.map(c => c.high).sort((a, b) => b - a);
-        return {
-            support: lows[Math.floor(lows.length * 0.1)],
-            resistance: highs[Math.floor(highs.length * 0.1)]
-        };
+        let support = lows[Math.floor(lows.length * 0.1)];
+        let resistance = highs[Math.floor(highs.length * 0.1)];
+        // Ensure minimum spread of 0.5% between support and resistance
+        const currentPrice = recent[recent.length - 1].close;
+        const minSpread = currentPrice * 0.005;
+        if (resistance - support < minSpread) {
+            const mid = (support + resistance) / 2;
+            support = mid - minSpread;
+            resistance = mid + minSpread;
+        }
+        return { support, resistance };
     }
 
     calculateStrength(rsi, emaCross, volumeSpike, macd) {
