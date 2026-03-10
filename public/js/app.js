@@ -32,7 +32,7 @@ const ADMIN_EMAIL = 'f1098749586@gmail.com';
 
 // ==================== STATE ====================
 let binanceWs = null;
-let isPresent = false;
+let isPresent = true;
 let signals = [];
 let prices = {};
 let priceHistory = {};
@@ -100,6 +100,7 @@ auth.onAuthStateChanged(async (user) => {
         }
 
         showDashboard();
+        await loadUserConfig();
         applyFavoritesToEngine();
         connectWebSocket();
         initAudio();
@@ -729,23 +730,13 @@ function updateRiskSemaphore(signal) {
 // ==================== PRESENT/AWAY MODE ====================
 function toggleMode() {
     isPresent = !isPresent;
-    const toggle = document.getElementById('modeToggle');
-    const label = document.getElementById('modeLabel');
-    const icon = document.getElementById('modeIcon');
-
+    updateModeUI();
     if (isPresent) {
-        toggle.classList.add('active');
-        label.textContent = 'Presente';
-        label.className = 'text-xs text-[#00ff41] hidden sm:inline';
-        icon.className = 'fas fa-sun text-[8px]';
         showToast('🔊 Modo Presente activado. Recibirás alertas sonoras y visuales.', 'success');
     } else {
-        toggle.classList.remove('active');
-        label.textContent = 'Away';
-        label.className = 'text-xs text-gray-400 hidden sm:inline';
-        icon.className = 'fas fa-moon text-[8px] text-gray-700';
         showToast('📱 Modo Away activado. Recibirás notificaciones Push.', 'info');
     }
+    saveUserConfig();
 }
 
 // ==================== ALERTS ====================
@@ -1816,6 +1807,7 @@ function saveTelegramConfig() {
 
     localStorage.setItem('alphaTelegramToken', token);
     localStorage.setItem('alphaTelegramChatId', chatId);
+    saveUserConfig();
 
     // Test connection
     testTelegramConnection(token, chatId);
@@ -1890,6 +1882,7 @@ async function saveGeminiConfig() {
             } else if (resp.status === 429) {
                 showToast('⚠️ Key válida pero con límite alcanzado. Intenta más tarde.', 'warning');
                 localStorage.setItem('alphaGeminiKey', key);
+                saveUserConfig();
             } else {
                 showToast(`❌ Error de Google: ${msg}`, 'error');
             }
@@ -1900,6 +1893,7 @@ async function saveGeminiConfig() {
         const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
         if (text) {
             localStorage.setItem('alphaGeminiKey', key);
+            saveUserConfig();
             showToast('✅ Gemini AI verificado y activado correctamente.', 'success');
         } else {
             showToast('❌ La API respondió pero sin contenido. Verifica tu key.', 'error');
@@ -2035,7 +2029,7 @@ handleNewSignal = async function(signal) {
 
 // ==================== MERCADOS (MARKET EXPLORER) ====================
 let allMarketPairs = [];
-let marketCategory = 'favorites';
+let marketCategory = 'all';
 let marketsLoaded = false;
 
 const CRYPTO_CATEGORIES = {
@@ -2069,6 +2063,7 @@ function toggleFavorite(symbol) {
     saveFavorites(favs);
     renderMarkets();
     applyFavoritesToEngine();
+    saveUserConfig();
 }
 
 function updateFavCount() {
@@ -2244,16 +2239,81 @@ function changeTimeframe(newInterval) {
     connectWebSocket();
 
     showToast(`⏱️ Temporalidad cambiada a ${newInterval}`, 'info');
-    localStorage.setItem('alphasignal_timeframe', newInterval);
+    saveUserConfig();
 }
 
-// Restore saved timeframe on load
-(function restoreTimeframe() {
-    const saved = localStorage.getItem('alphasignal_timeframe');
-    if (saved && ['1m', '5m', '15m', '1h'].includes(saved)) {
-        KLINE_INTERVAL = saved;
+// ==================== FIREBASE USER CONFIG (Portable) ====================
+async function loadUserConfig() {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    try {
+        const doc = await db.collection('users').doc(uid).collection('settings').doc('config').get();
+        if (doc.exists) {
+            const cfg = doc.data();
+            // Restore timeframe
+            if (cfg.timeframe && ['1m', '5m', '15m', '1h'].includes(cfg.timeframe)) {
+                KLINE_INTERVAL = cfg.timeframe;
+            }
+            // Restore favorites
+            if (Array.isArray(cfg.favorites)) {
+                localStorage.setItem('alphasignal_favorites', JSON.stringify(cfg.favorites));
+            }
+            // Restore Telegram config
+            if (cfg.telegramToken) localStorage.setItem('alphaTelegramToken', cfg.telegramToken);
+            if (cfg.telegramChatId) localStorage.setItem('alphaTelegramChatId', cfg.telegramChatId);
+            // Restore Gemini key
+            if (cfg.geminiKey) localStorage.setItem('alphaGeminiKey', cfg.geminiKey);
+            // Restore present mode
+            if (typeof cfg.isPresent === 'boolean') {
+                isPresent = cfg.isPresent;
+                updateModeUI();
+            }
+            console.log('☁️ Config de usuario cargada desde Firebase');
+        } else {
+            // First time: migrate localStorage to Firebase
+            await saveUserConfig();
+            console.log('☁️ Config migrada a Firebase');
+        }
+    } catch (e) {
+        console.error('Error loading user config:', e);
     }
-})();
+}
+
+async function saveUserConfig() {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    try {
+        await db.collection('users').doc(uid).collection('settings').doc('config').set({
+            timeframe: KLINE_INTERVAL,
+            favorites: getFavorites(),
+            telegramToken: localStorage.getItem('alphaTelegramToken') || '',
+            telegramChatId: localStorage.getItem('alphaTelegramChatId') || '',
+            geminiKey: localStorage.getItem('alphaGeminiKey') || '',
+            isPresent: isPresent,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+    } catch (e) {
+        console.error('Error saving user config:', e);
+    }
+}
+
+function updateModeUI() {
+    const toggle = document.getElementById('modeToggle');
+    const label = document.getElementById('modeLabel');
+    const icon = document.getElementById('modeIcon');
+    if (!toggle || !label || !icon) return;
+    if (isPresent) {
+        toggle.classList.add('active');
+        label.textContent = 'Presente';
+        label.className = 'text-xs text-[#00ff41] hidden sm:inline';
+        icon.className = 'fas fa-sun text-[8px]';
+    } else {
+        toggle.classList.remove('active');
+        label.textContent = 'Away';
+        label.className = 'text-xs text-gray-400 hidden sm:inline';
+        icon.className = 'fas fa-moon text-[8px] text-gray-700';
+    }
+}
 
 // ==================== BACKTESTING ENGINE ====================
 let btRunning = false;
