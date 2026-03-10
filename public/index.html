@@ -93,10 +93,10 @@
                     <div class="flex items-center gap-3">
                         <!-- Presente/Away Toggle -->
                         <div class="flex items-center gap-2 px-3 py-1.5 glass-card rounded-lg">
-                            <span id="modeLabel" class="text-xs text-gray-400 hidden sm:inline">Away</span>
-                            <button id="modeToggle" onclick="toggleMode()" class="relative w-12 h-6 rounded-full bg-gray-700 transition-colors duration-300">
+                            <span id="modeLabel" class="text-xs text-[#00ff41] hidden sm:inline">Presente</span>
+                            <button id="modeToggle" onclick="toggleMode()" class="active relative w-12 h-6 rounded-full bg-gray-700 transition-colors duration-300">
                                 <div id="modeKnob" class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-gray-400 transition-all duration-300 flex items-center justify-center">
-                                    <i id="modeIcon" class="fas fa-moon text-[8px] text-gray-700"></i>
+                                    <i id="modeIcon" class="fas fa-sun text-[8px]"></i>
                                 </div>
                             </button>
                         </div>
@@ -830,7 +830,7 @@
 
                     <!-- Category Filters -->
                     <div class="flex flex-wrap gap-2 mb-4">
-                        <button onclick="filterMarketCategory('favorites')" id="mcat-favorites" class="market-cat-btn px-3 py-1.5 text-[10px] font-medium rounded-lg border transition flex items-center gap-1.5 bg-amber-500/10 border-amber-500/30 text-amber-400">
+                        <button onclick="filterMarketCategory('favorites')" id="mcat-favorites" class="market-cat-btn px-3 py-1.5 text-[10px] font-medium rounded-lg border transition flex items-center gap-1.5 bg-[#1a1a2e] border-gray-700/30 text-gray-400">
                             <i class="fas fa-star"></i> Mis Favoritos
                         </button>
                         <button onclick="filterMarketCategory('all')" id="mcat-all" class="market-cat-btn px-3 py-1.5 text-[10px] font-medium rounded-lg border transition flex items-center gap-1.5 bg-blue-500/10 border-blue-500/30 text-blue-400">
