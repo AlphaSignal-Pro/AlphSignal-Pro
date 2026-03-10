@@ -107,6 +107,7 @@ auth.onAuthStateChanged(async (user) => {
         requestNotificationPermission();
         await loadSignalsFromFirestore();
         await loadTrackRecordFromFirestore();
+        verifyPendingSignals(); // Check old unverified signals immediately
         await loadLessonsFromFirestore();
 
         // Show admin tab if admin + run cleanup
@@ -1537,7 +1538,7 @@ async function loadTrackRecordFromFirestore() {
     if (!uid) return;
     try {
         const snap = await db.collection('users').doc(uid).collection('trackRecord')
-            .orderBy('timestamp', 'desc').limit(100).get();
+            .orderBy('timestamp', 'desc').limit(200).get();
         trackRecord = snap.docs.map(d => d.data());
         console.log(`📊 Track record cargado: ${trackRecord.length} señales`);
     } catch (e) {
@@ -1560,11 +1561,26 @@ async function saveTrackRecordEntry(entry) {
 }
 
 function addSignalToTrackRecord(signal) {
+    // Calculate TP/SL for verification
+    const price = signal.price;
+    const fallbackDist = price * 0.005;
+    let tp, sl;
+    if (signal.direction === 'BUY') {
+        tp = signal.resistance > price ? signal.resistance : price + fallbackDist * 2;
+        sl = signal.support < price ? signal.support : price - fallbackDist;
+    } else {
+        tp = signal.support < price ? signal.support : price - fallbackDist * 2;
+        sl = signal.resistance > price ? signal.resistance : price + fallbackDist;
+    }
+
     const entry = {
         id: signal.id,
         symbol: signal.symbol,
+        symbolRaw: signal.symbolRaw || signal.symbol.replace('/USDT', '').toLowerCase() + 'usdt',
         direction: signal.direction,
         price: signal.price,
+        tp: tp,
+        sl: sl,
         strength: signal.strength.value,
         riskLevel: signal.riskLevel,
         rsi: signal.rsi,
@@ -1572,12 +1588,10 @@ function addSignalToTrackRecord(signal) {
         verified: false,
         result: null,
         priceAfter: null,
+        changePercent: null,
     };
     trackRecord.unshift(entry);
     saveTrackRecordEntry(entry);
-
-    // Schedule verification after 5 minutes
-    setTimeout(() => verifySignal(entry.id), 5 * 60 * 1000);
 
     // Add marker to chart
     chartSignalMarkers.push({
@@ -1590,45 +1604,125 @@ function addSignalToTrackRecord(signal) {
     applyChartMarkers();
 }
 
-async function verifySignal(signalId) {
-    const entry = trackRecord.find(t => t.id === signalId);
-    if (!entry || entry.verified) return;
+async function verifySignal(entry) {
+    if (!entry || entry.verified) return false;
+
+    // Need at least 3 minutes since signal
+    const age = Date.now() - entry.timestamp;
+    if (age < 3 * 60 * 1000) return false;
 
     try {
-        const resp = await fetch(`${BINANCE_API}/ticker/price?symbol=${entry.symbol.toUpperCase()}`);
-        const data = await resp.json();
-        const currentPrice = parseFloat(data.price);
+        const sym = (entry.symbolRaw || entry.symbol.replace('/USDT', '').toLowerCase() + 'usdt').toUpperCase();
 
-        entry.priceAfter = currentPrice;
-        entry.verified = true;
+        // Fetch klines since signal was created to check if TP/SL was hit
+        const startTime = entry.timestamp;
+        const resp = await fetch(`${BINANCE_API}/klines?symbol=${sym}&interval=1m&startTime=${startTime}&limit=60`);
+        const klines = await resp.json();
+        if (!Array.isArray(klines) || klines.length === 0) return false;
 
-        if (entry.direction === 'BUY') {
-            entry.result = currentPrice > entry.price ? 'win' : 'loss';
-        } else {
-            entry.result = currentPrice < entry.price ? 'win' : 'loss';
+        let tpHit = false, slHit = false;
+        let exitPrice = parseFloat(klines[klines.length - 1][4]); // latest close
+
+        for (const k of klines) {
+            const high = parseFloat(k[2]);
+            const low = parseFloat(k[3]);
+
+            if (entry.tp && entry.sl) {
+                if (entry.direction === 'BUY') {
+                    if (high >= entry.tp) { tpHit = true; exitPrice = entry.tp; break; }
+                    if (low <= entry.sl) { slHit = true; exitPrice = entry.sl; break; }
+                } else {
+                    if (low <= entry.tp) { tpHit = true; exitPrice = entry.tp; break; }
+                    if (high >= entry.sl) { slHit = true; exitPrice = entry.sl; break; }
+                }
+            }
         }
 
-        entry.changePercent = ((currentPrice - entry.price) / entry.price * 100).toFixed(2);
+        entry.priceAfter = exitPrice;
+        entry.verified = true;
+
+        if (tpHit) {
+            entry.result = 'win';
+        } else if (slHit) {
+            entry.result = 'loss';
+        } else if (age > 30 * 60 * 1000) {
+            // After 30 min without hitting TP/SL, resolve by current price direction
+            if (entry.direction === 'BUY') {
+                entry.result = exitPrice > entry.price ? 'win' : 'loss';
+            } else {
+                entry.result = exitPrice < entry.price ? 'win' : 'loss';
+            }
+        } else {
+            // Not enough time, don't verify yet
+            entry.verified = false;
+            return false;
+        }
+
+        entry.changePercent = ((exitPrice - entry.price) / entry.price * 100).toFixed(2);
 
         saveTrackRecordEntry(entry);
-        renderTrackRecord();
-        showToast(`📊 Señal verificada: ${entry.symbol} → ${entry.result === 'win' ? '✅ Acierto' : '❌ Fallo'}`, entry.result === 'win' ? 'success' : 'error');
+        return true;
     } catch (e) {
         console.error('Error verifying signal:', e);
+        return false;
     }
 }
 
+async function verifyPendingSignals() {
+    const now = Date.now();
+    const maxAge = 24 * 60 * 60 * 1000; // 24 hours
+    const pending = trackRecord.filter(t => !t.verified && (now - t.timestamp) < maxAge);
+
+    // Auto-expire very old signals (>24h) that were never verified
+    trackRecord.forEach(t => {
+        if (!t.verified && (now - t.timestamp) >= maxAge) {
+            t.verified = true;
+            t.result = 'expired';
+            t.priceAfter = null;
+            t.changePercent = '0.00';
+            saveTrackRecordEntry(t);
+        }
+    });
+
+    if (pending.length === 0) {
+        renderTrackRecord();
+        return;
+    }
+
+    console.log(`🔍 Verificando ${pending.length} señales pendientes...`);
+    let verified = 0;
+
+    for (const entry of pending) {
+        const success = await verifySignal(entry);
+        if (success) verified++;
+        // Small delay between API calls to avoid rate limiting
+        await new Promise(r => setTimeout(r, 300));
+    }
+
+    if (verified > 0) {
+        console.log(`✅ ${verified} señales verificadas de ${pending.length} pendientes`);
+    }
+    renderTrackRecord();
+}
+
+// Periodic verification: check pending signals every 60 seconds
+setInterval(() => {
+    if (auth.currentUser && trackRecord.some(t => !t.verified)) {
+        verifyPendingSignals();
+    }
+}, 60 * 1000);
+
 function renderTrackRecord() {
-    const verified = trackRecord.filter(t => t.verified);
-    const wins = verified.filter(t => t.result === 'win').length;
-    const losses = verified.filter(t => t.result === 'loss').length;
-    const total = verified.length;
+    const resolved = trackRecord.filter(t => t.verified && (t.result === 'win' || t.result === 'loss'));
+    const wins = resolved.filter(t => t.result === 'win').length;
+    const losses = resolved.filter(t => t.result === 'loss').length;
+    const total = resolved.length;
     const winRate = total > 0 ? ((wins / total) * 100).toFixed(1) : '--';
 
     // Calculate streak
     let streak = 0;
     let streakType = '';
-    for (const t of verified) {
+    for (const t of resolved) {
         if (!streakType) { streakType = t.result; streak = 1; }
         else if (t.result === streakType) streak++;
         else break;
@@ -1641,7 +1735,7 @@ function renderTrackRecord() {
     document.getElementById('trStreak').textContent = (streakType === 'win' ? '+' : '-') + streak;
 
     // Render performance chart
-    renderPerformanceChart(verified);
+    renderPerformanceChart(resolved);
 
     // Render table
     const table = document.getElementById('trackRecordTable');
@@ -1655,9 +1749,13 @@ function renderTrackRecord() {
         const isBuy = t.direction === 'BUY';
         let resultBadge = '<span class="text-[10px] text-gray-600 px-2 py-0.5 rounded-full bg-gray-800">⏳ Pendiente</span>';
         if (t.verified) {
-            resultBadge = t.result === 'win'
-                ? `<span class="text-[10px] text-[#00ff41] px-2 py-0.5 rounded-full bg-[#00ff41]/10">✅ +${Math.abs(t.changePercent)}%</span>`
-                : `<span class="text-[10px] text-red-400 px-2 py-0.5 rounded-full bg-red-500/10">❌ ${t.changePercent}%</span>`;
+            if (t.result === 'win') {
+                resultBadge = `<span class="text-[10px] text-[#00ff41] px-2 py-0.5 rounded-full bg-[#00ff41]/10">✅ +${Math.abs(t.changePercent)}%</span>`;
+            } else if (t.result === 'loss') {
+                resultBadge = `<span class="text-[10px] text-red-400 px-2 py-0.5 rounded-full bg-red-500/10">❌ ${t.changePercent}%</span>`;
+            } else if (t.result === 'expired') {
+                resultBadge = '<span class="text-[10px] text-gray-500 px-2 py-0.5 rounded-full bg-gray-800">⌛ Expirada</span>';
+            }
         }
         return `
             <div class="tr-row flex items-center justify-between py-2.5 px-3 rounded-lg bg-gray-800/20 border border-gray-800/30">
