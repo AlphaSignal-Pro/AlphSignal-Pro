@@ -134,6 +134,9 @@
                     <button onclick="switchTab('backtest')" id="tab-backtest" class="tab-btn px-4 py-2 text-xs font-medium rounded-lg transition whitespace-nowrap flex items-center gap-1.5">
                         <i class="fas fa-flask"></i> Backtest
                     </button>
+                    <button onclick="switchTab('mercados')" id="tab-mercados" class="tab-btn px-4 py-2 text-xs font-medium rounded-lg transition whitespace-nowrap flex items-center gap-1.5">
+                        <i class="fas fa-globe"></i> Mercados
+                    </button>
                     <button onclick="switchTab('config')" id="tab-config" class="tab-btn px-4 py-2 text-xs font-medium rounded-lg transition whitespace-nowrap flex items-center gap-1.5">
                         <i class="fas fa-cog"></i> Config
                     </button>
@@ -798,6 +801,73 @@
                     <div class="w-full bg-gray-800 rounded-full h-1.5 mt-3">
                         <div id="btProgressBar" class="bg-purple-500 h-1.5 rounded-full transition-all" style="width: 0%"></div>
                     </div>
+                </div>
+            </div>
+
+            <!-- ==================== VIEW: MERCADOS ==================== -->
+            <div id="view-mercados" class="hidden space-y-4">
+
+                <!-- Search & Filters -->
+                <div class="glass-card rounded-xl p-4">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-sm font-semibold text-gray-300 flex items-center gap-2">
+                            <i class="fas fa-globe text-blue-400"></i>
+                            Explorador de Mercados
+                            <span id="marketCount" class="px-2 py-0.5 rounded-full text-[10px] bg-blue-500/20 text-blue-400">0 pares</span>
+                        </h2>
+                        <div class="flex items-center gap-2">
+                            <span id="favCount" class="text-[10px] text-amber-400"><i class="fas fa-star"></i> <span id="favCountNum">0</span> favoritos</span>
+                        </div>
+                    </div>
+
+                    <!-- Search -->
+                    <div class="relative mb-4">
+                        <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-xs"></i>
+                        <input type="text" id="marketSearch" placeholder="Buscar par... (BTC, ETH, DOGE...)"
+                            oninput="filterMarkets()"
+                            class="w-full pl-9 pr-4 py-2.5 bg-[#1a1a2e]/80 border border-gray-700/50 rounded-lg text-white text-xs placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500/50">
+                    </div>
+
+                    <!-- Category Filters -->
+                    <div class="flex flex-wrap gap-2 mb-4">
+                        <button onclick="filterMarketCategory('favorites')" id="mcat-favorites" class="market-cat-btn px-3 py-1.5 text-[10px] font-medium rounded-lg border transition flex items-center gap-1.5 bg-amber-500/10 border-amber-500/30 text-amber-400">
+                            <i class="fas fa-star"></i> Mis Favoritos
+                        </button>
+                        <button onclick="filterMarketCategory('all')" id="mcat-all" class="market-cat-btn px-3 py-1.5 text-[10px] font-medium rounded-lg border transition flex items-center gap-1.5 bg-blue-500/10 border-blue-500/30 text-blue-400">
+                            <i class="fas fa-coins"></i> Todas
+                        </button>
+                        <button onclick="filterMarketCategory('top')" id="mcat-top" class="market-cat-btn px-3 py-1.5 text-[10px] font-medium rounded-lg border transition flex items-center gap-1.5 bg-[#1a1a2e] border-gray-700/30 text-gray-400">
+                            <i class="fas fa-fire"></i> Top 20
+                        </button>
+                        <button onclick="filterMarketCategory('defi')" id="mcat-defi" class="market-cat-btn px-3 py-1.5 text-[10px] font-medium rounded-lg border transition flex items-center gap-1.5 bg-[#1a1a2e] border-gray-700/30 text-gray-400">
+                            <i class="fas fa-link"></i> DeFi
+                        </button>
+                        <button onclick="filterMarketCategory('layer1')" id="mcat-layer1" class="market-cat-btn px-3 py-1.5 text-[10px] font-medium rounded-lg border transition flex items-center gap-1.5 bg-[#1a1a2e] border-gray-700/30 text-gray-400">
+                            <i class="fas fa-layer-group"></i> Layer 1
+                        </button>
+                        <button onclick="filterMarketCategory('meme')" id="mcat-meme" class="market-cat-btn px-3 py-1.5 text-[10px] font-medium rounded-lg border transition flex items-center gap-1.5 bg-[#1a1a2e] border-gray-700/30 text-gray-400">
+                            <i class="fas fa-dog"></i> Memes
+                        </button>
+                        <button onclick="filterMarketCategory('gaming')" id="mcat-gaming" class="market-cat-btn px-3 py-1.5 text-[10px] font-medium rounded-lg border transition flex items-center gap-1.5 bg-[#1a1a2e] border-gray-700/30 text-gray-400">
+                            <i class="fas fa-gamepad"></i> Gaming
+                        </button>
+                    </div>
+
+                    <!-- Active Monitoring Info -->
+                    <div class="bg-[#00ff41]/5 border border-[#00ff41]/10 rounded-lg p-3 mb-4">
+                        <p class="text-[11px] text-gray-300"><i class="fas fa-info-circle text-[#00ff41] mr-1"></i> <strong class="text-[#00ff41]">Tus favoritos</strong> se monitorean en tiempo real para generar señales de trading. Agrega o quita pares con la estrella <i class="fas fa-star text-amber-400"></i>.</p>
+                    </div>
+                </div>
+
+                <!-- Markets Grid -->
+                <div id="marketsGrid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2">
+                    <!-- Filled dynamically -->
+                </div>
+
+                <!-- Loading -->
+                <div id="marketsLoading" class="glass-card rounded-xl p-8 text-center">
+                    <i class="fas fa-spinner fa-spin text-blue-400 text-2xl mb-3"></i>
+                    <p class="text-gray-400 text-xs">Cargando pares de Binance...</p>
                 </div>
             </div>
 
