@@ -936,8 +936,8 @@
                         <div>
                             <label class="text-[10px] text-gray-500 uppercase block mb-1">Máx. Posiciones</label>
                             <select id="atMaxPositions" onchange="saveAutoTradingConfig()" class="w-full px-2 py-2 bg-[#1a1a2e]/80 border border-gray-700/50 rounded-lg text-white text-xs focus:outline-none">
-                                <option value="3" selected>3 posiciones</option>
-                                <option value="5">5 posiciones</option>
+                                <option value="3">3 posiciones</option>
+                                <option value="5" selected>5 posiciones</option>
                                 <option value="8">8 posiciones</option>
                                 <option value="10">10 posiciones</option>
                             </select>
@@ -945,17 +945,17 @@
                         <div>
                             <label class="text-[10px] text-gray-500 uppercase block mb-1">Fuerza Mínima</label>
                             <select id="atMinStrength" onchange="saveAutoTradingConfig()" class="w-full px-2 py-2 bg-[#1a1a2e]/80 border border-gray-700/50 rounded-lg text-white text-xs focus:outline-none">
-                                <option value="30">30%+ (todas)</option>
+                                <option value="30" selected>30%+ (todas)</option>
                                 <option value="45">45%+ (moderadas)</option>
-                                <option value="60" selected>60%+ (fuertes)</option>
+                                <option value="60">60%+ (fuertes)</option>
                                 <option value="75">75%+ (muy fuertes)</option>
                             </select>
                         </div>
                         <div>
                             <label class="text-[10px] text-gray-500 uppercase block mb-1">Solo Semáforo</label>
                             <select id="atRiskFilter" onchange="saveAutoTradingConfig()" class="w-full px-2 py-2 bg-[#1a1a2e]/80 border border-gray-700/50 rounded-lg text-white text-xs focus:outline-none">
-                                <option value="all">Todos</option>
-                                <option value="green" selected>🟢 Solo Verde</option>
+                                <option value="all" selected>Todos</option>
+                                <option value="green">🟢 Solo Verde</option>
                                 <option value="yellow">🟡 Verde + Amarillo</option>
                             </select>
                         </div>
