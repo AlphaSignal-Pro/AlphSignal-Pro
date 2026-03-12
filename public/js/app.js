@@ -2495,11 +2495,23 @@ function paperTradeSignal(signal) {
     saveAutoTradingState();
 }
 
+// Time Exit: max open minutes based on signal strength
+function getMaxOpenMinutes(strength) {
+    if (strength >= 65) return 240;  // 4h - very strong signal, more patience
+    if (strength >= 50) return 180;  // 3h - strong signal
+    if (strength >= 35) return 120;  // 2h - moderate signal
+    return 90;                       // 1.5h - weak signal, close fast
+}
+
+// Minimum profit to cover round-trip fees (0.1% per side = 0.2% total)
+const EXCHANGE_FEE_PCT = 0.002; // 0.2% round trip
+
 function checkPaperPositions() {
     if (paperPositions.length === 0) return;
 
     let changed = false;
     const toClose = [];
+    const now = Date.now();
 
     for (const pos of paperPositions) {
         const sym = pos.symbolRaw;
@@ -2508,21 +2520,58 @@ function checkPaperPositions() {
 
         pos.currentPrice = livePrice;
 
+        // Calculate PnL
         if (pos.direction === 'BUY') {
             pos.unrealizedPnl = (livePrice - pos.entryPrice) * pos.quantity;
-            if (livePrice >= pos.tp) {
-                toClose.push({ pos, reason: 'TP Hit', exitPrice: pos.tp });
-            } else if (livePrice <= pos.sl) {
-                toClose.push({ pos, reason: 'SL Hit', exitPrice: pos.sl });
-            }
         } else {
             pos.unrealizedPnl = (pos.entryPrice - livePrice) * pos.quantity;
+        }
+
+        // --- TP/SL Check (priority) ---
+        if (pos.direction === 'BUY') {
+            if (livePrice >= pos.tp) {
+                toClose.push({ pos, reason: 'TP', exitPrice: pos.tp });
+                continue;
+            } else if (livePrice <= pos.sl) {
+                toClose.push({ pos, reason: 'SL', exitPrice: pos.sl });
+                continue;
+            }
+        } else {
             if (livePrice <= pos.tp) {
-                toClose.push({ pos, reason: 'TP Hit', exitPrice: pos.tp });
+                toClose.push({ pos, reason: 'TP', exitPrice: pos.tp });
+                continue;
             } else if (livePrice >= pos.sl) {
-                toClose.push({ pos, reason: 'SL Hit', exitPrice: pos.sl });
+                toClose.push({ pos, reason: 'SL', exitPrice: pos.sl });
+                continue;
             }
         }
+
+        // --- Time Exit Logic ---
+        const openMinutes = (now - pos.openTime) / 60000;
+        const maxMinutes = getMaxOpenMinutes(pos.strength || 30);
+        const feesThreshold = pos.positionValue * EXCHANGE_FEE_PCT;
+
+        // Phase 1: After max time, close if profit covers fees
+        if (openMinutes > maxMinutes && pos.unrealizedPnl > feesThreshold) {
+            console.log(`⏱️ Time Exit: ${pos.symbol} (${Math.round(openMinutes)}min > ${maxMinutes}min) | PnL: +$${pos.unrealizedPnl.toFixed(2)} > fees $${feesThreshold.toFixed(2)}`);
+            toClose.push({ pos, reason: `Time Exit (${Math.round(openMinutes)}min)`, exitPrice: livePrice });
+            continue;
+        }
+
+        // Phase 2: After 1.5x max time, close if breakeven (PnL >= 0)
+        if (openMinutes > maxMinutes * 1.5 && pos.unrealizedPnl >= 0) {
+            console.log(`⏱️ Time Breakeven: ${pos.symbol} (${Math.round(openMinutes)}min) | PnL: $${pos.unrealizedPnl.toFixed(2)}`);
+            toClose.push({ pos, reason: `Time BE (${Math.round(openMinutes)}min)`, exitPrice: livePrice });
+            continue;
+        }
+
+        // Phase 3: After 2x max time, force close to free capital (even at loss)
+        if (openMinutes > maxMinutes * 2) {
+            console.log(`⏱️ Time Stop: ${pos.symbol} (${Math.round(openMinutes)}min) | FORZADO | PnL: $${pos.unrealizedPnl.toFixed(2)}`);
+            toClose.push({ pos, reason: `Time Stop (${Math.round(openMinutes)}min)`, exitPrice: livePrice });
+            continue;
+        }
+
         changed = true;
     }
 
@@ -2530,7 +2579,7 @@ function checkPaperPositions() {
         closePaperPosition(pos, exitPrice, reason);
     }
 
-    if (changed) renderAutoTrading();
+    if (changed || toClose.length > 0) renderAutoTrading();
 }
 
 function closePaperPosition(pos, exitPrice, reason) {
@@ -2608,13 +2657,20 @@ function renderAutoTrading() {
                 const isBuy = p.direction === 'BUY';
                 const tpDist = ((Math.abs(p.tp - p.entryPrice) / p.entryPrice) * 100).toFixed(2);
                 const slDist = ((Math.abs(p.sl - p.entryPrice) / p.entryPrice) * 100).toFixed(2);
+                const maxMin = getMaxOpenMinutes(p.strength || 30);
+                const timeRatio = Math.min(elapsed / maxMin, 2);
+                const timeColor = timeRatio < 0.7 ? 'text-gray-500' : timeRatio < 1 ? 'text-yellow-400' : 'text-orange-400';
+                const timeBarColor = timeRatio < 0.7 ? 'bg-blue-500' : timeRatio < 1 ? 'bg-yellow-400' : timeRatio < 1.5 ? 'bg-orange-400' : 'bg-red-500';
+                const timeBarPct = Math.min(timeRatio * 50, 100); // 50% at maxMin, 100% at 2x
+                const feesMin = (p.positionValue * EXCHANGE_FEE_PCT).toFixed(2);
+                const timeLabel = elapsed >= maxMin * 2 ? '⚠️ FORCE CLOSE' : elapsed >= maxMin ? `⏱️ ${maxMin - elapsed < 0 ? 'Cerrando...' : ''}` : `${maxMin - elapsed}min left`;
                 return `
                     <div class="bg-gray-800/30 border border-gray-700/30 rounded-lg p-3">
                         <div class="flex items-center justify-between mb-2">
                             <div class="flex items-center gap-2">
                                 <span class="px-2 py-0.5 rounded text-[10px] font-bold ${isBuy ? 'bg-[#00ff41]/15 text-[#00ff41]' : 'bg-red-500/15 text-red-400'}">${p.direction}</span>
                                 <span class="text-white text-xs font-bold">${p.symbol}</span>
-                                <span class="text-gray-500 text-[10px]">${elapsed}min</span>
+                                <span class="${timeColor} text-[10px]">${elapsed}min</span>
                             </div>
                             <span class="${pnlColor} text-xs font-bold font-mono">${pnlSign}$${p.unrealizedPnl.toFixed(2)}</span>
                         </div>
@@ -2634,6 +2690,17 @@ function renderAutoTrading() {
                                 const color = clamped > 50 ? 'bg-[#00ff41]' : 'bg-red-400';
                                 return `<div class="${color} h-1 rounded-full transition-all" style="width: ${clamped}%"></div>`;
                             })()}
+                        </div>
+                        <div class="mt-1.5 flex items-center justify-between text-[9px]">
+                            <div class="flex items-center gap-1">
+                                <i class="fas fa-clock ${timeColor}"></i>
+                                <span class="${timeColor}">${timeLabel}</span>
+                                <span class="text-gray-600">(máx ${maxMin}min)</span>
+                            </div>
+                            <span class="text-gray-600">Fees mín: $${feesMin}</span>
+                        </div>
+                        <div class="mt-1 w-full bg-gray-700 rounded-full h-0.5">
+                            <div class="${timeBarColor} h-0.5 rounded-full transition-all" style="width: ${timeBarPct}%"></div>
                         </div>
                     </div>`;
             }).join('');
